@@ -130,20 +130,35 @@ PRE_MERGE_COMMANDS=["pytest", "ruff check .", "bandit -r src/"]
 
 ## Usage
 
-### Starting the Daemon
+### CLI Commands
 
 ```bash
-# Run Clover
-clover
+# Show available commands
+clover --help
 
-# Or via Python module
-python -m scripts.orchestrator.main
+# Start the daemon
+clover run
 
-# With verbose logging
-clover --verbose
+# Start with verbose logging
+clover run --verbose
 
 # Single poll cycle (useful for testing)
-clover --once
+clover run --once
+
+# Show current state and in-progress work
+clover status
+
+# Show configuration
+clover config
+
+# Clear state for an issue (allows re-processing)
+clover clear issue 42
+
+# Clear state for a PR review
+clover clear review 7
+
+# Clear state for a merge
+clover clear merge 7
 ```
 
 ### Workflow: Implementing Issues

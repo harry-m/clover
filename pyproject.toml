@@ -22,7 +22,11 @@ dev = [
 ]
 
 [project.scripts]
-clover = "scripts.orchestrator.main:main"
+clover = "scripts.orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
