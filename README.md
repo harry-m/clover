@@ -1,6 +1,8 @@
-# Claude Development Orchestrator
+# Clover 🍀
 
-A local Python daemon that watches GitHub issues and pull requests, automatically launching Claude Code processes to implement features and review code.
+*Claude's Little Observer, Validator, and Executor of Requests*
+
+A local Python daemon that watches GitHub issues and pull requests, automatically launching Claude Code to implement features and review code.
 
 ## Overview
 
@@ -15,7 +17,7 @@ A local Python daemon that watches GitHub issues and pull requests, automaticall
           │                   │                   │
           ▼                   ▼                   ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                  Local Orchestrator Daemon                      │
+│                        Clover Daemon                            │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
 │  │  Implement   │    │    Review    │    │ Run Checks   │      │
 │  │   Feature    │    │      PR      │    │  & Merge     │      │
@@ -64,8 +66,8 @@ claude
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-org/claude-orchestrator.git
-   cd claude-orchestrator
+   git clone https://github.com/harry-m/clover.git
+   cd clover
    ```
 
 2. **Install dependencies**:
@@ -90,7 +92,7 @@ Create a `.env` file in the project root (or set environment variables):
 | `GITHUB_REPO` | Repository to watch (owner/repo format) | `harry-m/dashai` |
 | `GITHUB_TOKEN` | GitHub Personal Access Token | `ghp_xxxx...` |
 
-**Note**: If you've authenticated with `gh auth login`, the orchestrator will automatically use that token and `GITHUB_TOKEN` is optional.
+**Note**: If you've authenticated with `gh auth login`, Clover will automatically use that token and `GITHUB_TOKEN` is optional.
 
 ### Optional Settings
 
@@ -131,14 +133,17 @@ PRE_MERGE_COMMANDS=["pytest", "ruff check .", "bandit -r src/"]
 ### Starting the Daemon
 
 ```bash
-# Run the orchestrator
+# Run Clover
+clover
+
+# Or via Python module
 python -m scripts.orchestrator.main
 
 # With verbose logging
-python -m scripts.orchestrator.main --verbose
+clover --verbose
 
 # Single poll cycle (useful for testing)
-python -m scripts.orchestrator.main --once
+clover --once
 ```
 
 ### Workflow: Implementing Issues
@@ -180,7 +185,7 @@ python -m scripts.orchestrator.main --once
    - Delete the feature branch
    - Close any linked issues
 
-3. **If checks fail**, the orchestrator posts a comment explaining what failed
+3. **If checks fail**, Clover posts a comment explaining what failed
 
 ## Pre-merge Checks
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Main entry point for the Claude Development Orchestrator daemon."""
+"""Main entry point for the Clover daemon."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class Orchestrator:
 
     async def start(self) -> None:
         """Start the orchestrator daemon."""
-        logger.info(f"Starting Claude Orchestrator for {self.config.github_repo}")
+        logger.info(f"Starting Clover for {self.config.github_repo}")
         logger.info(f"Watching for issues with label: {self.config.ready_label}")
         logger.info(f"Poll interval: {self.config.poll_interval}s")
         logger.info(f"Max concurrent: {self.config.max_concurrent}")
@@ -381,8 +381,8 @@ class Orchestrator:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Claude Development Orchestrator - "
-        "Watch GitHub and launch Claude Code processes"
+        description="Clover - Watch GitHub and launch Claude Code "
+        "to implement features and review code"
     )
     parser.add_argument(
         "--verbose", "-v",

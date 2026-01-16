@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-orchestrator"
+name = "clover"
 version = "0.1.0"
-description = "A daemon that watches GitHub issues/PRs and launches Claude Code processes"
+description = "A daemon that watches GitHub issues/PRs and launches Claude Code to implement features and review code"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-claude-orchestrator = "scripts.orchestrator.main:main"
+clover = "scripts.orchestrator.main:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
