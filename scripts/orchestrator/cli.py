@@ -99,16 +99,27 @@ def cmd_clear(args: argparse.Namespace) -> int:
 
     state = State(config.state_file)
 
-    # Determine item type
+    # Handle --all flag
+    if args.all:
+        return _clear_all(state)
+
+    # Validate that type and number are provided for single-item clear
+    if args.type is None or args.number is None:
+        print("Error: type and number are required when not using --all")
+        return 1
+
+    # Determine item type (with synonyms)
     item_type_map = {
         "issue": WorkItemType.ISSUE,
+        "feature": WorkItemType.ISSUE,  # synonym
         "review": WorkItemType.PR_REVIEW,
+        "pr": WorkItemType.PR_REVIEW,  # synonym
         "merge": WorkItemType.PR_MERGE,
     }
 
     if args.type not in item_type_map:
         print(f"Unknown type: {args.type}")
-        print(f"Valid types: {', '.join(item_type_map.keys())}")
+        print(f"Valid types: issue (or feature), review (or pr), merge")
         return 1
 
     item_type = item_type_map[args.type]
@@ -124,6 +135,60 @@ def cmd_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _clear_all(state: State) -> int:
+    """Clear all state with confirmation."""
+    if not state.work_items:
+        print("State is already empty. Nothing to clear.")
+        return 0
+
+    # Build summary
+    issues = []
+    reviews = []
+    merges = []
+
+    for item in state.work_items.values():
+        if item.item_type == WorkItemType.ISSUE:
+            issues.append(item)
+        elif item.item_type == WorkItemType.PR_REVIEW:
+            reviews.append(item)
+        elif item.item_type == WorkItemType.PR_MERGE:
+            merges.append(item)
+
+    # Display summary
+    print("This will clear ALL state (blank slate):")
+    print()
+    if issues:
+        print(f"  Issues ({len(issues)}):")
+        for item in issues:
+            print(f"    - #{item.number} ({item.status.value})")
+    if reviews:
+        print(f"  PR Reviews ({len(reviews)}):")
+        for item in reviews:
+            print(f"    - #{item.number} ({item.status.value})")
+    if merges:
+        print(f"  PR Merges ({len(merges)}):")
+        for item in merges:
+            print(f"    - #{item.number} ({item.status.value})")
+    print()
+    print(f"Total: {len(state.work_items)} items will be cleared.")
+    print()
+
+    # Confirm
+    try:
+        response = input("Are you sure? (yes/no): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return 1
+
+    if response not in ("yes", "y"):
+        print("Aborted.")
+        return 1
+
+    count = state.clear_all()
+    print(f"Cleared {count} items. State is now empty.")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     """Show current configuration."""
     try:
@@ -135,7 +200,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     print("Clover Configuration")
     print("=" * 50)
     print(f"Repository:      {config.github_repo}")
-    print(f"Ready label:     {config.ready_label}")
+    print(f"Clover label:    {config.clover_label}")
     print(f"Poll interval:   {config.poll_interval}s")
     print(f"Max concurrent:  {config.max_concurrent}")
     print(f"Max turns:       {config.max_turns}")
@@ -188,12 +253,19 @@ def main() -> int:
     # Clear command
     clear_parser = subparsers.add_parser("clear", help="Clear state for re-processing")
     clear_parser.add_argument(
+        "--all", "-a",
+        action="store_true",
+        help="Clear all state (blank slate)",
+    )
+    clear_parser.add_argument(
         "type",
-        choices=["issue", "review", "merge"],
-        help="Type of item to clear",
+        nargs="?",
+        choices=["issue", "feature", "review", "pr", "merge"],
+        help="Type of item to clear (feature=issue, pr=review)",
     )
     clear_parser.add_argument(
         "number",
+        nargs="?",
         type=int,
         help="Issue or PR number",
     )

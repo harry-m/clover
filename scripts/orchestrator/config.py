@@ -23,8 +23,8 @@ class Config:
     # Worktree settings
     worktree_base: Path = field(default_factory=lambda: Path("./worktrees"))
 
-    # Label that triggers implementation
-    ready_label: str = "ready"
+    # Label that triggers Clover to work on issues/PRs
+    clover_label: str = "clover"
 
     # Concurrency limits
     max_concurrent: int = 2
@@ -95,7 +95,7 @@ class Config:
         # Optional settings with defaults
         poll_interval = int(env.get("POLL_INTERVAL", "60"))
         worktree_base = Path(env.get("WORKTREE_BASE", "./worktrees"))
-        ready_label = env.get("READY_LABEL", "ready")
+        clover_label = env.get("CLOVER_LABEL", "clover")
         max_concurrent = int(env.get("MAX_CONCURRENT", "2"))
         state_file = Path(env.get("STATE_FILE", "./.orchestrator-state.json"))
         max_turns = int(env.get("MAX_TURNS", "50"))
@@ -118,7 +118,7 @@ class Config:
             github_repo=github_repo,
             poll_interval=poll_interval,
             worktree_base=worktree_base,
-            ready_label=ready_label,
+            clover_label=clover_label,
             max_concurrent=max_concurrent,
             state_file=state_file,
             max_turns=max_turns,

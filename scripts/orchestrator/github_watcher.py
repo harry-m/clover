@@ -218,13 +218,13 @@ class GitHubWatcher:
 
         return response.json()
 
-    async def get_ready_issues(self) -> list[Issue]:
-        """Get issues with the ready label.
+    async def get_clover_issues(self) -> list[Issue]:
+        """Get issues with the clover label.
 
         Returns:
-            List of issues ready for implementation.
+            List of issues for Clover to implement.
         """
-        label = self.config.ready_label
+        label = self.config.clover_label
         path = f"/repos/{self.repo}/issues"
         params = {
             "labels": label,

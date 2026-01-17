@@ -46,7 +46,7 @@ class Orchestrator:
     async def start(self) -> None:
         """Start the orchestrator daemon."""
         logger.info(f"Starting Clover for {self.config.github_repo}")
-        logger.info(f"Watching for issues with label: {self.config.ready_label}")
+        logger.info(f"Watching for issues/PRs with label: {self.config.clover_label}")
         logger.info(f"Poll interval: {self.config.poll_interval}s")
         logger.info(f"Max concurrent: {self.config.max_concurrent}")
 
@@ -103,24 +103,27 @@ class Orchestrator:
             )
             return
 
-        # Check for ready issues
-        issues = await self.github.get_ready_issues()
+        # Check for issues with clover label
+        issues = await self.github.get_clover_issues()
         for issue in issues:
             if available_slots <= 0:
                 break
 
             if not self.state.is_processing(WorkItemType.ISSUE, issue.number):
-                logger.info(f"Found ready issue #{issue.number}: {issue.title}")
+                logger.info(f"Found issue #{issue.number}: {issue.title}")
                 task = asyncio.create_task(self._process_issue(issue))
                 self._active_tasks.add(task)
                 task.add_done_callback(self._active_tasks.discard)
                 available_slots -= 1
 
-        # Check for PRs needing review
+        # Check for PRs needing review (only Clover's PRs or PRs with clover label)
         prs = await self.github.get_open_prs()
         for pr in prs:
             if available_slots <= 0:
                 break
+
+            if not self._should_review_pr(pr):
+                continue
 
             if not self.state.is_processing(WorkItemType.PR_REVIEW, pr.number):
                 logger.info(f"Found PR needing review #{pr.number}: {pr.title}")
@@ -140,6 +143,17 @@ class Orchestrator:
                     task = asyncio.create_task(self._process_pr_merge(pr))
                     self._active_tasks.add(task)
                     task.add_done_callback(self._active_tasks.discard)
+
+    def _should_review_pr(self, pr: PullRequest) -> bool:
+        """Check if Clover should review this PR.
+
+        Args:
+            pr: Pull request to check.
+
+        Returns:
+            True if PR has the clover label.
+        """
+        return self.config.clover_label in pr.labels
 
     async def _process_issue(self, issue: Issue) -> None:
         """Process an issue by implementing it.
@@ -193,7 +207,7 @@ class Orchestrator:
 {result.output[:2000]}
 
 ---
-*Automatically implemented by Claude Orchestrator*
+*— Clover, the Claude Overseer*
 """
             pr = await self.github.create_pr(
                 branch=branch_name,
@@ -202,8 +216,11 @@ class Orchestrator:
                 base_branch=self._default_branch,
             )
 
-            # Remove ready label from issue
-            await self.github.remove_label(issue.number, self.config.ready_label)
+            # Add clover label to PR so Clover will review it
+            await self.github.add_label(pr.number, self.config.clover_label)
+
+            # Remove clover label from issue
+            await self.github.remove_label(issue.number, self.config.clover_label)
 
             # Mark completed
             self.state.mark_completed(WorkItemType.ISSUE, issue.number)
@@ -219,7 +236,7 @@ class Orchestrator:
                     issue.number,
                     f"❌ Failed to implement this issue automatically.\n\n"
                     f"Error: {str(e)[:500]}\n\n"
-                    f"*Claude Orchestrator*",
+                    f"*— Clover, the Claude Overseer*",
                 )
             except Exception:
                 pass
@@ -261,7 +278,7 @@ class Orchestrator:
 {result.output[:4000]}
 
 ---
-*Reviewed by Claude Orchestrator*
+*— Clover, the Claude Overseer*
 """
             await self.github.post_comment(pr.number, review_comment)
 
@@ -308,7 +325,7 @@ class Orchestrator:
                         pr.number,
                         f"❌ Pre-merge checks failed. Cannot merge.\n\n"
                         f"## Check Results\n\n{check_output}\n\n"
-                        f"*Claude Orchestrator*",
+                        f"*— Clover, the Claude Overseer*",
                     )
                     self.state.mark_failed(
                         WorkItemType.PR_MERGE, pr.number, "Pre-merge checks failed"
@@ -321,7 +338,7 @@ class Orchestrator:
                     f"✅ Pre-merge checks passed.\n\n"
                     f"## Check Results\n\n{check_output}\n\n"
                     f"Proceeding with merge...\n\n"
-                    f"*Claude Orchestrator*",
+                    f"*— Clover, the Claude Overseer*",
                 )
 
             # Check GitHub CI status
@@ -331,7 +348,7 @@ class Orchestrator:
                     pr.number,
                     f"❌ GitHub checks not passing: {ci_status}\n\n"
                     f"Please fix the failing checks before merging.\n\n"
-                    f"*Claude Orchestrator*",
+                    f"*— Clover, the Claude Overseer*",
                 )
                 self.state.mark_failed(
                     WorkItemType.PR_MERGE, pr.number, f"CI checks failed: {ci_status}"
@@ -364,7 +381,7 @@ class Orchestrator:
                 await self.github.post_comment(
                     pr.number,
                     f"❌ Failed to merge.\n\nError: {str(e)[:500]}\n\n"
-                    f"*Claude Orchestrator*",
+                    f"*— Clover, the Claude Overseer*",
                 )
             except Exception:
                 pass

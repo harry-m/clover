@@ -231,6 +231,20 @@ class State:
             self._save()
             logger.info(f"Cleared {item_type.value} #{number} from state")
 
+    def clear_all(self) -> int:
+        """Remove all items from state (blank slate).
+
+        Returns:
+            Number of items cleared.
+        """
+        count = len(self.work_items)
+        if count > 0:
+            self.work_items.clear()
+            self._dirty = True
+            self._save()
+            logger.info(f"Cleared all {count} items from state")
+        return count
+
     def get_in_progress_count(self) -> int:
         """Get count of items currently in progress."""
         return sum(

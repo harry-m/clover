@@ -137,14 +137,14 @@ class TestGitHubWatcher:
     """Tests for GitHubWatcher class."""
 
     @pytest.mark.asyncio
-    async def test_get_ready_issues(self, watcher):
-        """Test fetching ready issues."""
+    async def test_get_clover_issues(self, watcher):
+        """Test fetching issues with clover label."""
         mock_response = [
             {
                 "number": 42,
                 "title": "Test Issue",
                 "body": "Body",
-                "labels": [{"name": "ready"}],
+                "labels": [{"name": "clover"}],
                 "state": "open",
                 "created_at": "2024-01-01T00:00:00Z",
                 "user": {"login": "testuser"},
@@ -154,7 +154,7 @@ class TestGitHubWatcher:
                 "number": 7,
                 "title": "Test PR",
                 "body": "Body",
-                "labels": [{"name": "ready"}],
+                "labels": [{"name": "clover"}],
                 "state": "open",
                 "created_at": "2024-01-01T00:00:00Z",
                 "user": {"login": "testuser"},
@@ -165,7 +165,7 @@ class TestGitHubWatcher:
         with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_response
 
-            issues = await watcher.get_ready_issues()
+            issues = await watcher.get_clover_issues()
 
             assert len(issues) == 1
             assert issues[0].number == 42

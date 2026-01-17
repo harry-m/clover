@@ -32,7 +32,7 @@ class TestConfig:
             "GITHUB_REPO": "owner/repo",
             "POLL_INTERVAL": "120",
             "WORKTREE_BASE": "/tmp/worktrees",
-            "READY_LABEL": "do-it",
+            "CLOVER_LABEL": "do-it",
             "MAX_CONCURRENT": "5",
             "STATE_FILE": "/tmp/state.json",
             "MAX_TURNS": "100",
@@ -45,7 +45,7 @@ class TestConfig:
 
         assert config.poll_interval == 120
         assert config.worktree_base == Path("/tmp/worktrees")
-        assert config.ready_label == "do-it"
+        assert config.clover_label == "do-it"
         assert config.max_concurrent == 5
         assert config.state_file == Path("/tmp/state.json")
         assert config.max_turns == 100
@@ -115,7 +115,7 @@ class TestConfig:
         config = Config.from_env(env)
 
         assert config.poll_interval == 60
-        assert config.ready_label == "ready"
+        assert config.clover_label == "clover"
         assert config.max_concurrent == 2
         assert config.max_turns == 50
         assert config.auto_merge_enabled is True
