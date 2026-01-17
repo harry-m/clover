@@ -38,7 +38,7 @@ class Orchestrator:
         self.config = config
         self.state = State(config.state_file)
         self.github = GitHubWatcher(config)
-        self.worktrees = WorktreeManager(config)
+        self.worktrees = WorktreeManager(config, repo_path=config.repo_path)
         self.claude = ClaudeRunner(config)
         self._shutdown = False
         self._active_tasks: set[asyncio.Task] = set()
@@ -209,6 +209,22 @@ class Orchestrator:
 
             if not result.success:
                 raise ClaudeRunnerError(f"Implementation failed: {result.output[:500]}")
+
+            # Check if there are any commits to push
+            has_commits = await self.worktrees.has_commits_ahead(
+                worktree.path, self._default_branch
+            )
+
+            if not has_commits:
+                logger.info(f"No commits made for issue #{issue.number}, nothing to push")
+                await self.github.post_comment(
+                    issue.number,
+                    f"I looked at this issue but didn't find any changes to make.\n\n"
+                    f"Claude's response:\n\n{result.output[:1000]}\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+                self.state.mark_completed(WorkItemType.ISSUE, issue.number)
+                return
 
             # Push branch
             await self.worktrees.push_branch(worktree.path, branch_name)
@@ -463,6 +479,10 @@ async def async_main(args: argparse.Namespace) -> int:
         logger.info("Running single poll cycle")
         orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
         await orchestrator._poll_cycle()
+        # Wait for all tasks to complete
+        if orchestrator._active_tasks:
+            logger.info(f"Waiting for {len(orchestrator._active_tasks)} task(s) to complete...")
+            await asyncio.gather(*orchestrator._active_tasks, return_exceptions=True)
         await orchestrator._cleanup()
     else:
         await orchestrator.start()

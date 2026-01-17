@@ -23,6 +23,9 @@ class Config:
     # Worktree settings
     worktree_base: Path = field(default_factory=lambda: Path("./worktrees"))
 
+    # Repository path (where the git repo is located)
+    repo_path: Path = field(default_factory=Path.cwd)
+
     # Label that triggers Clover to work on issues/PRs
     clover_label: str = "clover"
 
@@ -95,6 +98,7 @@ class Config:
         # Optional settings with defaults
         poll_interval = int(env.get("POLL_INTERVAL", "60"))
         worktree_base = Path(env.get("WORKTREE_BASE", "./worktrees"))
+        repo_path = Path(env.get("REPO_PATH", ".")).resolve()
         clover_label = env.get("CLOVER_LABEL", "clover")
         max_concurrent = int(env.get("MAX_CONCURRENT", "2"))
         state_file = Path(env.get("STATE_FILE", "./.orchestrator-state.json"))
@@ -118,6 +122,7 @@ class Config:
             github_repo=github_repo,
             poll_interval=poll_interval,
             worktree_base=worktree_base,
+            repo_path=repo_path,
             clover_label=clover_label,
             max_concurrent=max_concurrent,
             state_file=state_file,

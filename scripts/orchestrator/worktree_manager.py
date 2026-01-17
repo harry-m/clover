@@ -46,7 +46,11 @@ class WorktreeManager:
         """
         self.config = config
         self.repo_path = repo_path or Path.cwd()
-        self.worktree_base = config.worktree_base
+        # Resolve worktree_base relative to repo_path if it's a relative path
+        if config.worktree_base.is_absolute():
+            self.worktree_base = config.worktree_base
+        else:
+            self.worktree_base = self.repo_path / config.worktree_base
 
     async def _run_git(
         self, *args: str, cwd: Optional[Path] = None, check: bool = True
@@ -124,22 +128,38 @@ class WorktreeManager:
         await self._run_git("fetch", "origin", base_branch, check=False)
 
         if checkout_existing:
-            # Checkout existing remote branch
+            # Try to fetch from remote first
             await self._run_git("fetch", "origin", branch_name, check=False)
-            await self._run_git(
-                "worktree",
-                "add",
-                str(worktree_path),
-                f"origin/{branch_name}",
+
+            # Check if branch exists on remote
+            _, remote_check, _ = await self._run_git(
+                "ls-remote", "--heads", "origin", branch_name, check=False
             )
-            # Create local tracking branch
-            await self._run_git(
-                "checkout",
-                "-B",
-                branch_name,
-                f"origin/{branch_name}",
-                cwd=worktree_path,
-            )
+
+            if remote_check.strip():
+                # Branch exists on remote - checkout from there
+                await self._run_git(
+                    "worktree",
+                    "add",
+                    str(worktree_path),
+                    f"origin/{branch_name}",
+                )
+                # Create local tracking branch
+                await self._run_git(
+                    "checkout",
+                    "-B",
+                    branch_name,
+                    f"origin/{branch_name}",
+                    cwd=worktree_path,
+                )
+            else:
+                # Branch only exists locally - checkout local branch
+                await self._run_git(
+                    "worktree",
+                    "add",
+                    str(worktree_path),
+                    branch_name,
+                )
         else:
             # Create new branch from base
             await self._run_git(
@@ -281,6 +301,26 @@ class WorktreeManager:
                 )
 
         return worktrees
+
+    async def has_commits_ahead(self, worktree_path: Path, base_branch: str) -> bool:
+        """Check if the current branch has commits ahead of base branch.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to compare against.
+
+        Returns:
+            True if there are commits ahead of base branch.
+        """
+        _, output, _ = await self._run_git(
+            "rev-list", f"origin/{base_branch}..HEAD", "--count",
+            cwd=worktree_path, check=False
+        )
+        try:
+            count = int(output.strip())
+            return count > 0
+        except ValueError:
+            return False
 
     async def push_branch(self, worktree_path: Path, branch_name: str) -> None:
         """Push a branch to origin.

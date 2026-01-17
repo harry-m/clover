@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,6 +14,31 @@ from typing import Optional
 from .config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def _find_claude_cli() -> str:
+    """Find the claude CLI executable.
+
+    Returns:
+        Path to claude CLI or just 'claude' if in PATH.
+    """
+    # First check if it's in PATH
+    claude_path = shutil.which("claude")
+    if claude_path:
+        return claude_path
+
+    # On Windows, check common npm locations
+    if os.name == "nt":
+        possible_paths = [
+            Path(os.environ.get("APPDATA", "")) / "npm" / "claude.cmd",
+            Path("C:/nvm4w/nodejs/claude.cmd"),
+            Path(os.environ.get("ProgramFiles", "")) / "nodejs" / "claude.cmd",
+        ]
+        for path in possible_paths:
+            if path.exists():
+                return str(path)
+
+    return "claude"  # Fall back to hoping it's in PATH
 
 
 @dataclass
@@ -74,9 +101,13 @@ class ClaudeRunner:
                 "TodoWrite",
             ]
 
+        # Find claude CLI
+        claude_cli = _find_claude_cli()
+        logger.debug(f"Using Claude CLI: {claude_cli}")
+
         # Build command
         cmd = [
-            "claude",
+            claude_cli,
             "-p",  # Print mode (non-interactive)
             "--output-format", "json",
             "--max-turns", str(self.config.max_turns),
