@@ -19,7 +19,7 @@ class TestWorkItem:
             number=42,
             status=WorkItemStatus.IN_PROGRESS,
             worktree_path="/tmp/issue-42",
-            branch_name="feature/issue-42",
+            branch_name="clover/issue-42",
             started_at="2024-01-01T00:00:00",
         )
 
@@ -29,7 +29,7 @@ class TestWorkItem:
         assert d["number"] == 42
         assert d["status"] == "in_progress"
         assert d["worktree_path"] == "/tmp/issue-42"
-        assert d["branch_name"] == "feature/issue-42"
+        assert d["branch_name"] == "clover/issue-42"
         assert d["started_at"] == "2024-01-01T00:00:00"
 
     def test_from_dict(self):
@@ -72,7 +72,7 @@ class TestState:
                 WorkItemType.ISSUE,
                 42,
                 worktree_path="/tmp/issue-42",
-                branch_name="feature/issue-42",
+                branch_name="clover/issue-42",
             )
 
             assert item.status == WorkItemStatus.IN_PROGRESS

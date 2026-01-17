@@ -303,6 +303,34 @@ class WorktreeManager:
         await self._run_git("push", "origin", "--delete", branch_name, check=False)
         logger.info(f"Deleted remote branch {branch_name}")
 
+    async def branch_exists(self, branch_name: str) -> bool:
+        """Check if a branch exists locally or on remote.
+
+        Args:
+            branch_name: Name of the branch to check.
+
+        Returns:
+            True if branch exists locally or on origin.
+        """
+        # Check local branches
+        returncode, output, _ = await self._run_git(
+            "branch", "--list", branch_name, check=False
+        )
+        if returncode == 0 and output.strip():
+            return True
+
+        # Check remote branches
+        returncode, _, _ = await self._run_git(
+            "ls-remote", "--heads", "origin", branch_name, check=False
+        )
+        if returncode != 0:
+            return False
+
+        _, output, _ = await self._run_git(
+            "ls-remote", "--heads", "origin", branch_name
+        )
+        return bool(output.strip())
+
     async def get_default_branch(self) -> str:
         """Get the default branch of the repository.
 

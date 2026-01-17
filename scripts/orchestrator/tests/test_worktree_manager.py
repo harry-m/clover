@@ -33,13 +33,13 @@ class TestWorktree:
     def test_create(self):
         """Test creating a Worktree."""
         wt = Worktree(
-            path=Path("/tmp/worktrees/feature-42"),
-            branch="feature/issue-42",
+            path=Path("/tmp/worktrees/clover-42"),
+            branch="clover/issue-42",
             commit="abc123",
         )
 
-        assert wt.path == Path("/tmp/worktrees/feature-42")
-        assert wt.branch == "feature/issue-42"
+        assert wt.path == Path("/tmp/worktrees/clover-42")
+        assert wt.branch == "clover/issue-42"
         assert wt.commit == "abc123"
 
 
@@ -94,13 +94,13 @@ class TestWorktreeManager:
             with patch.object(Path, "exists", return_value=False):
                 with patch.object(Path, "mkdir"):
                     wt = await manager.create_worktree(
-                        "feature/issue-42",
+                        "clover/issue-42",
                         base_branch="main",
                     )
 
-                    assert wt.branch == "feature/issue-42"
+                    assert wt.branch == "clover/issue-42"
                     assert wt.commit == "abc123"
-                    assert "feature-issue-42" in str(wt.path)
+                    assert "clover-issue-42" in str(wt.path)
 
     @pytest.mark.asyncio
     async def test_create_worktree_replaces_slashes(self, manager):
@@ -160,11 +160,11 @@ class TestWorktreeManager:
         # Only include the non-main worktree in output to avoid path comparison issues
         # The main repo filtering is tested implicitly by the manager skipping
         # paths that match repo_path
-        worktree_path_str = str(manager.config.worktree_base / "feature-42")
+        worktree_path_str = str(manager.config.worktree_base / "clover-42")
 
         porcelain_output = f"""worktree {worktree_path_str}
 HEAD def456
-branch refs/heads/feature/issue-42
+branch refs/heads/clover/issue-42
 
 """
         mock_proc = MagicMock()
@@ -177,7 +177,7 @@ branch refs/heads/feature/issue-42
             worktrees = await manager.list_worktrees()
 
             assert len(worktrees) == 1
-            assert worktrees[0].branch == "feature/issue-42"
+            assert worktrees[0].branch == "clover/issue-42"
             assert worktrees[0].commit == "def456"
 
     @pytest.mark.asyncio

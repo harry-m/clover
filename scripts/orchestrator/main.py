@@ -161,10 +161,23 @@ class Orchestrator:
         Args:
             issue: Issue to implement.
         """
-        branch_name = f"feature/issue-{issue.number}"
+        branch_name = f"clover/issue-{issue.number}"
         worktree = None
 
         try:
+            # Check if branch already exists (locally or on remote)
+            branch_exists = await self.worktrees.branch_exists(branch_name)
+            existing_item = self.state.get_item(WorkItemType.ISSUE, issue.number)
+
+            if branch_exists:
+                # Branch exists - assume we were working on it, resume
+                logger.info(
+                    f"Found existing branch {branch_name}, resuming work on issue #{issue.number}"
+                )
+                checkout_existing = True
+            else:
+                checkout_existing = False
+
             # Mark as in progress
             self.state.mark_in_progress(
                 WorkItemType.ISSUE,
@@ -176,6 +189,7 @@ class Orchestrator:
             worktree = await self.worktrees.create_worktree(
                 branch_name,
                 base_branch=self._default_branch,
+                checkout_existing=checkout_existing,
             )
 
             self.state.mark_in_progress(
@@ -447,6 +461,7 @@ async def async_main(args: argparse.Namespace) -> int:
     # Run
     if args.once:
         logger.info("Running single poll cycle")
+        orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
         await orchestrator._poll_cycle()
         await orchestrator._cleanup()
     else:
