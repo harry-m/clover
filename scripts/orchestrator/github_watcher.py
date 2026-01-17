@@ -428,7 +428,7 @@ class GitHubWatcher:
             True if merged successfully.
         """
         path = f"/repos/{self.repo}/pulls/{pr_number}/merge"
-        data = {"merge_method": "squash"}
+        data = {"merge_method": "rebase"}
         if commit_title:
             data["commit_title"] = commit_title
 
