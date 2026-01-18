@@ -79,6 +79,7 @@ class CloverDisplay:
         Returns:
             Callback function for output.
         """
+        display = self  # Capture reference to display
 
         def callback(line: str, tool_name: str | None = None) -> None:
             agent.add_output(line)
@@ -86,6 +87,8 @@ class CloverDisplay:
                 agent.set_tool(tool_name)
             elif "completed" in line.lower() or "done" in line.lower():
                 agent.set_tool(None)
+            # Trigger display refresh to show new output
+            display.refresh()
 
         return callback
 

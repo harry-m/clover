@@ -47,8 +47,12 @@ def _run_async(coro) -> int:
         # On Windows, we need to be more careful about cleanup
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        result = 0
         try:
-            return loop.run_until_complete(coro)
+            result = loop.run_until_complete(coro)
+        except KeyboardInterrupt:
+            # Handle Ctrl+C gracefully
+            pass
         finally:
             try:
                 # Cancel any pending tasks
@@ -56,18 +60,27 @@ def _run_async(coro) -> int:
                 for task in pending:
                     task.cancel()
                 # Run the loop briefly to let cancellations propagate
+                # Use return_exceptions=True to suppress CancelledError
                 if pending:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass  # Ignore errors during cleanup
+            try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
                 # Python 3.9+ has shutdown_default_executor
                 if hasattr(loop, "shutdown_default_executor"):
                     loop.run_until_complete(loop.shutdown_default_executor())
-            finally:
-                # Clear the event loop reference before closing
-                asyncio.set_event_loop(None)
-                loop.close()
-                # Force garbage collection after loop is closed and cleared
-                gc.collect()
+            except Exception:
+                pass
+            # Clear the event loop reference before closing
+            asyncio.set_event_loop(None)
+            loop.close()
+            # Force garbage collection after loop is closed and cleared
+            gc.collect()
+        return result
     else:
         return asyncio.run(coro)
 

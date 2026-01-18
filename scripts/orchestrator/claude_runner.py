@@ -152,9 +152,14 @@ class ClaudeRunner:
             stderr_chunks = []
 
             first_response = True
+            # Buffer for accumulating streaming text
+            text_buffer = ""
+            last_text_output_time = 0
 
             async def read_stdout():
-                nonlocal first_response
+                nonlocal first_response, text_buffer, last_text_output_time
+                import time
+
                 while True:
                     line = await proc.stdout.readline()
                     if not line:
@@ -166,77 +171,114 @@ class ClaudeRunner:
                         try:
                             data = json.loads(line_str)
                             msg_type = data.get("type", "")
+                            subtype = data.get("subtype", "")
 
-                            if msg_type == "init":
+                            if msg_type == "system" and subtype == "init":
                                 # Session initialized
                                 if on_output:
                                     on_output("Claude session started", None)
-                            elif msg_type == "system":
-                                # System prompt loaded
-                                if on_output:
-                                    on_output("Reading task...", None)
                             elif msg_type == "content_block_start":
                                 # New content block starting
                                 block = data.get("content_block", {})
                                 block_type = block.get("type", "")
                                 if block_type == "tool_use":
+                                    # Flush any accumulated text before tool use
+                                    if text_buffer.strip():
+                                        if on_output:
+                                            on_output(text_buffer.strip()[:200], None)
+                                        text_buffer = ""
                                     tool = block.get("name", "unknown")
                                     if on_output:
                                         on_output(f"Using tool: {tool}", tool)
                                     else:
                                         logger.info(f"[Claude] Using tool: {tool}")
+                                elif block_type == "text":
+                                    # Text block starting - Claude is thinking/responding
+                                    if first_response:
+                                        first_response = False
+                                        if on_output:
+                                            on_output("Claude is thinking...", None)
                             elif msg_type == "content_block_delta":
-                                # Streaming text delta
+                                # Streaming delta
                                 delta = data.get("delta", {})
                                 delta_type = delta.get("type", "")
                                 if delta_type == "text_delta":
                                     text = delta.get("text", "")
-                                    if text and len(text) > 20:
-                                        # Only show substantial text chunks
-                                        if on_output:
-                                            on_output(text[:200], None)
-                                        else:
-                                            logger.info(f"[Claude] {text[:200]}")
-                            elif msg_type == "assistant":
-                                # Show when Claude starts responding
-                                if first_response:
-                                    first_response = False
-                                    if on_output:
-                                        on_output("Claude is working...", None)
+                                    if text:
+                                        text_buffer += text
+                                        # Output accumulated text periodically (every ~500ms)
+                                        # or when buffer gets long enough
+                                        now = time.time()
+                                        if (now - last_text_output_time > 0.5 and text_buffer.strip()) or len(text_buffer) > 100:
+                                            # Find a good break point (newline or space)
+                                            output_text = text_buffer
+                                            if "\n" in output_text:
+                                                # Output up to last newline
+                                                last_nl = output_text.rfind("\n")
+                                                output_text = text_buffer[:last_nl]
+                                                text_buffer = text_buffer[last_nl + 1:]
+                                            else:
+                                                text_buffer = ""
 
+                                            if output_text.strip():
+                                                # Split into lines and output
+                                                for out_line in output_text.split("\n"):
+                                                    if out_line.strip():
+                                                        if on_output:
+                                                            on_output(out_line[:200], None)
+                                                        else:
+                                                            logger.info(f"[Claude] {out_line[:200]}")
+                                            last_text_output_time = now
+                            elif msg_type == "content_block_stop":
+                                # Content block finished - flush remaining text
+                                if text_buffer.strip():
+                                    for out_line in text_buffer.split("\n"):
+                                        if out_line.strip():
+                                            if on_output:
+                                                on_output(out_line[:200], None)
+                                            else:
+                                                logger.info(f"[Claude] {out_line[:200]}")
+                                    text_buffer = ""
+                            elif msg_type == "assistant":
+                                # Full assistant message (non-streaming or final)
                                 # Extract text from assistant messages
                                 msg = data.get("message", {})
                                 content = msg.get("content", [])
                                 for item in content:
                                     if item.get("type") == "text":
-                                        text = item.get("text", "")[:200]
+                                        text = item.get("text", "")
                                         if text:
-                                            if on_output:
-                                                on_output(text, None)
-                                            else:
-                                                logger.info(f"[Claude] {text}")
+                                            # Show first line or snippet
+                                            first_line = text.split("\n")[0][:200]
+                                            if first_line.strip():
+                                                if on_output:
+                                                    on_output(first_line, None)
+                                                else:
+                                                    logger.info(f"[Claude] {first_line}")
                                     elif item.get("type") == "tool_use":
                                         tool = item.get("name", "unknown")
                                         if on_output:
                                             on_output(f"Using tool: {tool}", tool)
                                         else:
                                             logger.info(f"[Claude] Using tool: {tool}")
-                            elif msg_type == "tool_result":
-                                tool = data.get("tool_name", "unknown")
-                                if on_output:
-                                    on_output(f"Tool {tool} completed", None)
-                                else:
-                                    logger.info(f"[Claude] Tool {tool} completed")
+                            elif msg_type == "user":
+                                # Tool results - mark tool as completed
+                                content = data.get("message", {}).get("content", [])
+                                for item in content:
+                                    if item.get("type") == "tool_result":
+                                        # Clear the current tool indicator
+                                        if on_output:
+                                            on_output("...", None)  # Tool done indicator
                             elif msg_type == "result":
-                                # Send the result summary through callback
+                                # Final result
                                 result_text = data.get("result", "")
                                 if on_output:
                                     on_output("Task completed", None)
                                     if result_text:
                                         # Split long results into lines for display
-                                        for line in result_text.split("\n")[:15]:
-                                            if line.strip():
-                                                on_output(line[:200], None)
+                                        for result_line in result_text.split("\n")[:15]:
+                                            if result_line.strip():
+                                                on_output(result_line[:200], None)
                                 else:
                                     logger.info("[Claude] Task completed")
                         except json.JSONDecodeError:
