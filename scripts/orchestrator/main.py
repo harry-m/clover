@@ -405,6 +405,10 @@ class Orchestrator:
 """
             await self.github.post_comment(pr.number, review_comment)
 
+            # Remove clover label and add clover-reviewed
+            await self.github.remove_label(pr.number, self.config.clover_label)
+            await self.github.add_label(pr.number, "clover-reviewed")
+
             # Mark completed
             self.state.mark_completed(WorkItemType.PR_REVIEW, pr.number)
             self._log(f"Posted review for PR #{pr.number}")
