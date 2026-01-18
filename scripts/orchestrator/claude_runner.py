@@ -143,11 +143,18 @@ class ClaudeRunner:
                 limit=10 * 1024 * 1024,
             )
 
+            # Signal that Claude is starting
+            if on_output:
+                on_output("Waiting for Claude...", None)
+
             # Stream stdout to show Claude's activity in real-time
             stdout_chunks = []
             stderr_chunks = []
 
+            first_response = True
+
             async def read_stdout():
+                nonlocal first_response
                 while True:
                     line = await proc.stdout.readline()
                     if not line:
@@ -160,7 +167,21 @@ class ClaudeRunner:
                             data = json.loads(line_str)
                             msg_type = data.get("type", "")
 
-                            if msg_type == "assistant":
+                            if msg_type == "init":
+                                # Session initialized
+                                if on_output:
+                                    on_output("Claude session started", None)
+                            elif msg_type == "system":
+                                # System prompt loaded
+                                if on_output:
+                                    on_output("Reading task...", None)
+                            elif msg_type == "assistant":
+                                # Show when Claude starts responding
+                                if first_response:
+                                    first_response = False
+                                    if on_output:
+                                        on_output("Claude is working...", None)
+
                                 # Extract text from assistant messages
                                 msg = data.get("message", {})
                                 content = msg.get("content", [])
