@@ -261,14 +261,6 @@ class ClaudeRunner:
                                             on_output(f"Using tool: {tool}", tool)
                                         else:
                                             logger.info(f"[Claude] Using tool: {tool}")
-                            elif msg_type == "user":
-                                # Tool results - mark tool as completed
-                                content = data.get("message", {}).get("content", [])
-                                for item in content:
-                                    if item.get("type") == "tool_result":
-                                        # Clear the current tool indicator
-                                        if on_output:
-                                            on_output("...", None)  # Tool done indicator
                             elif msg_type == "result":
                                 # Final result
                                 result_text = data.get("result", "")
