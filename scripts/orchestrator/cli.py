@@ -11,6 +11,18 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Suppress the harmless "Event loop is closed" error on Windows during exit
+if sys.platform == "win32":
+    _original_del = asyncio.proactor_events._ProactorBasePipeTransport.__del__
+
+    def _silenced_del(self):
+        try:
+            _original_del(self)
+        except RuntimeError:
+            pass  # Ignore "Event loop is closed" during cleanup
+
+    asyncio.proactor_events._ProactorBasePipeTransport.__del__ = _silenced_del
+
 from .config import load_config
 from .docker_utils import DockerError
 from .main import async_main
@@ -38,17 +50,24 @@ def _run_async(coro) -> int:
         try:
             return loop.run_until_complete(coro)
         finally:
-            # Cancel any pending tasks
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                task.cancel()
-            # Run the loop briefly to let cancellations propagate
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            # Force garbage collection before closing the loop
-            gc.collect()
-            loop.close()
+            try:
+                # Cancel any pending tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                # Run the loop briefly to let cancellations propagate
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                # Python 3.9+ has shutdown_default_executor
+                if hasattr(loop, "shutdown_default_executor"):
+                    loop.run_until_complete(loop.shutdown_default_executor())
+            finally:
+                # Clear the event loop reference before closing
+                asyncio.set_event_loop(None)
+                loop.close()
+                # Force garbage collection after loop is closed and cleared
+                gc.collect()
     else:
         return asyncio.run(coro)
 
