@@ -248,6 +248,140 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    """Initialize a new Clover project."""
+    import re
+    import subprocess
+
+    target_dir = get_repo_path(args) or Path.cwd()
+    config_path = target_dir / "clover.yaml"
+    gitignore_path = target_dir / ".gitignore"
+
+    # Check if config already exists
+    if config_path.exists() and not args.force:
+        print(f"clover.yaml already exists in {target_dir}")
+        print("Use --force to overwrite.")
+        return 1
+
+    # Try to detect GitHub repo from git remote
+    github_repo = None
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            cwd=target_dir,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            remote_url = result.stdout.strip()
+            # Parse GitHub URL (SSH or HTTPS)
+            # git@github.com:owner/repo.git
+            # https://github.com/owner/repo.git
+            match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
+            if match:
+                github_repo = f"{match.group(1)}/{match.group(2)}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    if not github_repo:
+        github_repo = "owner/repo-name  # TODO: Update with your repo"
+
+    # Generate clover.yaml content
+    config_content = f"""# Clover configuration
+# Documentation: https://github.com/anthropics/claude-code
+
+github:
+  # Repository in format: owner/repo
+  repo: {github_repo}
+
+  # GitHub token - uses gh CLI by default, or set GITHUB_TOKEN env var
+  # token: ${{GITHUB_TOKEN}}
+
+  # Label that triggers Clover (default: clover)
+  label: clover
+
+daemon:
+  # Seconds between GitHub polling (default: 60)
+  poll_interval: 60
+
+  # Maximum concurrent Claude instances (default: 2)
+  max_concurrent: 2
+
+  # Maximum turns per Claude conversation (default: 50)
+  max_turns: 50
+
+# Review settings - commands to run during PR review
+review:
+  commands: []
+    # Examples (uncomment for your project):
+    # - npm test
+    # - npm run lint
+    # - pytest
+    # - ruff check .
+
+# Test session settings - for `clover test` command
+test:
+  # Path to docker-compose file (default: docker-compose.yml)
+  compose_file: docker-compose.yml
+
+  # Container for interactive Claude sessions (default: first container)
+  # container: develop
+"""
+
+    # Write config file
+    config_path.write_text(config_content)
+    print(f"Created {config_path}")
+
+    # Update .gitignore
+    gitignore_entries = [
+        "# Clover state and working files",
+        ".orchestrator-state.json",
+        ".clover-test-sessions.json",
+        ".clover-compose-override.yml",
+        "worktrees/",
+    ]
+
+    existing_gitignore = ""
+    if gitignore_path.exists():
+        existing_gitignore = gitignore_path.read_text()
+
+    # Check which entries are missing
+    missing_entries = []
+    for entry in gitignore_entries:
+        # Skip comment lines when checking
+        if entry.startswith("#"):
+            continue
+        if entry not in existing_gitignore:
+            missing_entries.append(entry)
+
+    if missing_entries:
+        # Add missing entries
+        with open(gitignore_path, "a") as f:
+            if existing_gitignore and not existing_gitignore.endswith("\n"):
+                f.write("\n")
+            if existing_gitignore:
+                f.write("\n")
+            f.write("# Clover state and working files\n")
+            for entry in missing_entries:
+                f.write(f"{entry}\n")
+        print(f"Updated {gitignore_path}")
+    else:
+        print(".gitignore already has Clover entries")
+
+    print()
+    print("Next steps:")
+    if "TODO" in github_repo:
+        print("  1. Edit clover.yaml and set your GitHub repository")
+    print("  2. Ensure you're authenticated with GitHub:")
+    print("     gh auth login")
+    print("  3. Add the 'clover' label to issues you want Clover to work on")
+    print("  4. Start Clover:")
+    print("     clover run")
+
+    return 0
+
+
 # Test command handlers
 
 def cmd_test(args: argparse.Namespace) -> int:
@@ -501,6 +635,14 @@ def main() -> int:
     # Config command
     subparsers.add_parser("config", help="Show configuration")
 
+    # Init command
+    init_parser = subparsers.add_parser("init", help="Initialize a new Clover project")
+    init_parser.add_argument(
+        "--force", "-f",
+        action="store_true",
+        help="Overwrite existing clover.yaml",
+    )
+
     # Test command with subcommands
     test_parser = subparsers.add_parser("test", help="Manage test sessions")
     test_subparsers = test_parser.add_subparsers(dest="test_command", help="Test commands")
@@ -575,6 +717,8 @@ def main() -> int:
         return cmd_clear(args)
     elif args.command == "config":
         return cmd_config(args)
+    elif args.command == "init":
+        return cmd_init(args)
     elif args.command == "test":
         # Handle test subcommands
         if args.test_command == "start":
