@@ -28,6 +28,11 @@ You are implementing a GitHub issue. Follow these guidelines:
    - Keep commits focused and atomic
    - WARNING: Any uncommitted changes will be lost when the worktree is cleaned up!
 
+7. **DO NOT Create a Pull Request**:
+   - Do NOT run `gh pr create` or create a PR yourself
+   - The orchestrator will create the PR automatically after you finish
+   - Just commit your changes and provide a summary
+
 ## Quality Checklist
 
 Before finishing:
