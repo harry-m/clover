@@ -70,9 +70,13 @@ class Orchestrator:
         if reset:
             logger.info(f"Reset {reset} in-progress items for resumption")
 
-        # Get default branch for creating feature branches
-        self._default_branch = await self.worktrees.get_default_branch()
-        logger.info(f"Default branch: {self._default_branch}")
+        # Get base branch for creating feature branches and PR targets
+        if self.config.base_branch:
+            self._default_branch = self.config.base_branch
+            logger.info(f"Base branch (configured): {self._default_branch}")
+        else:
+            self._default_branch = await self.worktrees.get_default_branch()
+            logger.info(f"Base branch (auto-detected): {self._default_branch}")
 
         # Main loop
         while not self._shutdown:
@@ -500,7 +504,10 @@ async def async_main(args: argparse.Namespace) -> int:
             reset = orchestrator.state.reset_in_progress_items()
             if reset:
                 logger.info(f"Reset {reset} in-progress items for resumption")
-            orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
+            if config.base_branch:
+                orchestrator._default_branch = config.base_branch
+            else:
+                orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
             await orchestrator._poll_cycle()
             # Wait for all tasks to complete
             if orchestrator._active_tasks:

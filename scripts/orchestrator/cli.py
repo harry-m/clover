@@ -262,6 +262,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     print("Clover Configuration")
     print("=" * 50)
     print(f"Repository:      {config.github_repo}")
+    print(f"Base branch:     {config.base_branch or '(auto-detect)'}")
     print(f"Clover label:    {config.clover_label}")
     print(f"Poll interval:   {config.poll_interval}s")
     print(f"Max concurrent:  {config.max_concurrent}")
@@ -332,6 +333,10 @@ github:
 
   # Label that triggers Clover (default: clover)
   label: clover
+
+  # Base branch for feature branches and PR targets
+  # Leave blank to auto-detect (repo's default branch)
+  # base_branch: develop
 
 daemon:
   # Seconds between GitHub polling (default: 60)

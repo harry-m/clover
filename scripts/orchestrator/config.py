@@ -32,6 +32,10 @@ class Config:
     github_token: str
     github_repo: str  # format: owner/repo
 
+    # Base branch for feature branches and PR targets
+    # None means auto-detect (repo's default branch)
+    base_branch: Optional[str] = None
+
     # Polling settings
     poll_interval: int = 60  # seconds between polls
 
@@ -130,6 +134,7 @@ class Config:
         worktree_base_str = daemon.get("worktree_base", "./worktrees")
         worktree_base = Path(worktree_base_str)
         clover_label = github.get("label", "clover")
+        base_branch = github.get("base_branch")  # None means auto-detect
         max_concurrent = daemon.get("max_concurrent", 2)
         state_file_str = daemon.get("state_file", "./.orchestrator-state.json")
         state_file = Path(state_file_str)
@@ -149,6 +154,7 @@ class Config:
         return cls(
             github_token=github_token,
             github_repo=github_repo,
+            base_branch=base_branch,
             poll_interval=poll_interval,
             worktree_base=worktree_base,
             repo_path=repo_path,

@@ -128,7 +128,9 @@ class TestSessionManager:
         return branch_or_issue
 
     async def _get_default_branch(self) -> str:
-        """Get the default branch name."""
+        """Get the base branch name (configured or auto-detected)."""
+        if self.config.base_branch:
+            return self.config.base_branch
         return await self.worktrees.get_default_branch()
 
     async def _find_compose_file(self, worktree_path: Path) -> Path:
