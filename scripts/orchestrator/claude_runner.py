@@ -175,6 +175,28 @@ class ClaudeRunner:
                                 # System prompt loaded
                                 if on_output:
                                     on_output("Reading task...", None)
+                            elif msg_type == "content_block_start":
+                                # New content block starting
+                                block = data.get("content_block", {})
+                                block_type = block.get("type", "")
+                                if block_type == "tool_use":
+                                    tool = block.get("name", "unknown")
+                                    if on_output:
+                                        on_output(f"Using tool: {tool}", tool)
+                                    else:
+                                        logger.info(f"[Claude] Using tool: {tool}")
+                            elif msg_type == "content_block_delta":
+                                # Streaming text delta
+                                delta = data.get("delta", {})
+                                delta_type = delta.get("type", "")
+                                if delta_type == "text_delta":
+                                    text = delta.get("text", "")
+                                    if text and len(text) > 20:
+                                        # Only show substantial text chunks
+                                        if on_output:
+                                            on_output(text[:200], None)
+                                        else:
+                                            logger.info(f"[Claude] {text[:200]}")
                             elif msg_type == "assistant":
                                 # Show when Claude starts responding
                                 if first_response:
