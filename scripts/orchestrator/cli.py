@@ -5,12 +5,52 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import logging
 import sys
+from pathlib import Path
+from typing import Optional
 
 from .config import load_config
+from .docker_utils import DockerError
 from .main import async_main
 from .state import State, WorkItemStatus, WorkItemType
+from .test_session import TestSessionManager
+
+
+def get_repo_path(args: argparse.Namespace) -> Optional[Path]:
+    """Get repo path from args, if specified."""
+    if hasattr(args, "repo") and args.repo:
+        return Path(args.repo)
+    return None
+
+
+def _run_async(coro) -> int:
+    """Run an async coroutine with proper cleanup on Windows.
+
+    This avoids the 'Event loop is closed' RuntimeError that occurs
+    when asyncio transports are garbage collected after the loop closes.
+    """
+    if sys.platform == "win32":
+        # On Windows, we need to be more careful about cleanup
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            # Cancel any pending tasks
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            # Run the loop briefly to let cancellations propagate
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            # Force garbage collection before closing the loop
+            gc.collect()
+            loop.close()
+    else:
+        return asyncio.run(coro)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -20,7 +60,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Reuse the existing async_main logic
     try:
-        return asyncio.run(async_main(args))
+        return _run_async(async_main(args))
     except KeyboardInterrupt:
         print("\nInterrupted")
         return 0
@@ -29,7 +69,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current state and in-progress work."""
     try:
-        config = load_config()
+        config = load_config(get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -90,7 +130,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_clear(args: argparse.Namespace) -> int:
     """Clear state for an issue or PR to allow re-processing."""
     try:
-        config = load_config()
+        config = load_config(get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -182,7 +222,7 @@ def _clear_all(state: State) -> int:
 def cmd_config(args: argparse.Namespace) -> int:
     """Show current configuration."""
     try:
-        config = load_config()
+        config = load_config(get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -208,6 +248,190 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+# Test command handlers
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """Start a test session."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+
+    try:
+        session = _run_async(manager.start(args.target))
+    except DockerError as e:
+        print(f"Docker error: {e}")
+        return 1
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+
+    print(f"Test session started: {session.session_id}")
+    print(f"  Branch: {session.branch_name}")
+    print(f"  Worktree: {session.worktree_path}")
+    print(f"  Container: {session.container_name}")
+    print()
+
+    if session.ports:
+        print("Ports:")
+        for port_key, host_port in session.ports.items():
+            service, container_port = port_key.split(":")
+            print(f"  {service} port {container_port} -> http://localhost:{host_port}")
+        print()
+
+    print("To attach to this session:")
+    print(f"  clover test attach {session.session_id}")
+    print()
+    print("To see logs:")
+    print(f"  clover test logs {session.session_id}")
+    print()
+    print("To stop:")
+    print(f"  clover test stop {session.session_id}")
+
+    return 0
+
+
+def cmd_test_attach(args: argparse.Namespace) -> int:
+    """Attach to a test session."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    session_id = getattr(args, "session_id", None)
+
+    try:
+        # This replaces the current process
+        _run_async(manager.attach(session_id))
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_test_list(args: argparse.Namespace) -> int:
+    """List test sessions."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    sessions = _run_async(manager.list_sessions())
+
+    if not sessions:
+        print("No test sessions found.")
+        return 0
+
+    print("Test Sessions")
+    print("=" * 60)
+
+    for session in sessions:
+        status_icon = "●" if session.status == "running" else "○"
+        print(f"\n{status_icon} {session.session_id}")
+        print(f"  Status: {session.status}")
+        print(f"  Branch: {session.branch_name}")
+        print(f"  Worktree: {session.worktree_path}")
+        if session.container_name:
+            print(f"  Container: {session.container_name}")
+        if session.ports:
+            print("  Ports:")
+            for port_key, host_port in session.ports.items():
+                service, container_port = port_key.split(":")
+                print(f"    {service}:{container_port} -> localhost:{host_port}")
+        print(f"  Started: {session.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    return 0
+
+
+def cmd_test_stop(args: argparse.Namespace) -> int:
+    """Stop a test session."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    session_id = args.session_id
+
+    # If no session_id, show list and prompt
+    if not session_id:
+        sessions = _run_async(manager.list_sessions())
+        running = [s for s in sessions if s.status == "running"]
+
+        if not running:
+            print("No running test sessions found.")
+            return 0
+
+        if len(running) == 1:
+            session_id = running[0].session_id
+            print(f"Stopping session: {session_id}")
+        else:
+            print("Multiple running sessions. Please specify which to stop:")
+            for s in running:
+                print(f"  - {s.session_id}")
+            return 1
+
+    try:
+        _run_async(manager.stop(session_id))
+        print(f"Stopped session: {session_id}")
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_test_logs(args: argparse.Namespace) -> int:
+    """Show logs from a test session."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    session_id = args.session_id
+
+    # If no session_id, use most recent
+    if not session_id:
+        sessions = _run_async(manager.list_sessions())
+        running = [s for s in sessions if s.status == "running"]
+
+        if not running:
+            print("No running test sessions found.")
+            return 1
+
+        session_id = max(running, key=lambda s: s.started_at).session_id
+
+    async def stream_logs():
+        try:
+            process = await manager.get_logs(session_id, follow=args.follow, tail=args.tail)
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                print(line.decode().rstrip())
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+        return 0
+
+    try:
+        return _run_async(stream_logs())
+    except KeyboardInterrupt:
+        print("\nStopped following logs.")
+        return 0
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -218,6 +442,11 @@ def main() -> int:
         "--version", "-V",
         action="version",
         version="%(prog)s 0.1.0",
+    )
+    parser.add_argument(
+        "--repo", "-r",
+        type=str,
+        help="Path to repository root (default: current directory)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -272,6 +501,62 @@ def main() -> int:
     # Config command
     subparsers.add_parser("config", help="Show configuration")
 
+    # Test command with subcommands
+    test_parser = subparsers.add_parser("test", help="Manage test sessions")
+    test_subparsers = test_parser.add_subparsers(dest="test_command", help="Test commands")
+
+    # test <target> - start a test session (default action)
+    test_start_parser = test_subparsers.add_parser("start", help="Start a test session")
+    test_start_parser.add_argument(
+        "target",
+        help="Issue number or branch name to test",
+    )
+
+    # test attach [session_id]
+    test_attach_parser = test_subparsers.add_parser("attach", help="Attach to a test session")
+    test_attach_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID to attach to (default: most recent)",
+    )
+
+    # test list
+    test_subparsers.add_parser("list", help="List test sessions")
+
+    # test stop [session_id]
+    test_stop_parser = test_subparsers.add_parser("stop", help="Stop a test session")
+    test_stop_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID to stop",
+    )
+
+    # test logs [session_id]
+    test_logs_parser = test_subparsers.add_parser("logs", help="Show logs from a test session")
+    test_logs_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID to get logs from (default: most recent)",
+    )
+    test_logs_parser.add_argument(
+        "-f", "--follow",
+        action="store_true",
+        help="Follow log output",
+    )
+    test_logs_parser.add_argument(
+        "-n", "--tail",
+        type=int,
+        default=100,
+        help="Number of lines to show (default: 100)",
+    )
+
+    # Also allow `clover test <target>` as shorthand for `clover test start <target>`
+    test_parser.add_argument(
+        "target",
+        nargs="?",
+        help="Issue number or branch name to test (shorthand for 'test start')",
+    )
+
     args = parser.parse_args()
 
     # Configure logging
@@ -290,6 +575,24 @@ def main() -> int:
         return cmd_clear(args)
     elif args.command == "config":
         return cmd_config(args)
+    elif args.command == "test":
+        # Handle test subcommands
+        if args.test_command == "start":
+            return cmd_test(args)
+        elif args.test_command == "attach":
+            return cmd_test_attach(args)
+        elif args.test_command == "list":
+            return cmd_test_list(args)
+        elif args.test_command == "stop":
+            return cmd_test_stop(args)
+        elif args.test_command == "logs":
+            return cmd_test_logs(args)
+        elif args.target:
+            # Shorthand: `clover test <target>` -> `clover test start <target>`
+            return cmd_test(args)
+        else:
+            test_parser.print_help()
+            return 0
     else:
         # No command specified - default to run for backwards compatibility
         # But show help if no args at all

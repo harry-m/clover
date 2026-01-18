@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import logging
 import signal
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -431,46 +430,25 @@ class Orchestrator:
                 self.display.refresh()
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Clover - Watch GitHub and launch Claude Code "
-        "to implement features and review code"
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        help="Path to .env config file",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run one poll cycle and exit (useful for testing)",
-    )
-    parser.add_argument(
-        "--tui",
-        action="store_true",
-        default=None,
-        help="Enable rich terminal UI (default when TTY)",
-    )
-    parser.add_argument(
-        "--no-tui",
-        action="store_true",
-        help="Disable rich terminal UI",
-    )
-    return parser.parse_args()
+def get_repo_path(args: argparse.Namespace) -> Optional[Path]:
+    """Get repo path from args, if specified.
+
+    Args:
+        args: Parsed command line arguments.
+
+    Returns:
+        Path to repository, or None for current directory.
+    """
+    if hasattr(args, "repo") and args.repo:
+        return Path(args.repo)
+    return None
 
 
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
     # Load config
     try:
-        config = load_config()
+        config = load_config(get_repo_path(args))
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return 1
@@ -533,21 +511,3 @@ async def async_main(args: argparse.Namespace) -> int:
             display.stop()
 
     return 0
-
-
-def main() -> int:
-    """Main entry point."""
-    args = parse_args()
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    try:
-        return asyncio.run(async_main(args))
-    except KeyboardInterrupt:
-        logger.info("Interrupted")
-        return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
-import json
 import os
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+import yaml
+
+
+@dataclass
+class TestConfig:
+    """Configuration for test sessions."""
+
+    # Path to docker-compose file (relative to repo root)
+    compose_file: str = "docker-compose.yml"
+
+    # Container to attach to for interactive Claude sessions
+    # If blank, uses "develop" if it exists, otherwise first container
+    container: Optional[str] = None
 
 
 @dataclass
 class Config:
-    """Orchestrator configuration loaded from environment variables."""
+    """Orchestrator configuration loaded from clover.yaml."""
 
     # GitHub settings
     github_token: str
@@ -46,6 +61,9 @@ class Config:
         default_factory=lambda: Path(__file__).parent / "prompts"
     )
 
+    # Test session settings
+    test: TestConfig = field(default_factory=TestConfig)
+
     @property
     def repo_owner(self) -> str:
         """Extract owner from github_repo."""
@@ -57,57 +75,76 @@ class Config:
         return self.github_repo.split("/")[1]
 
     @classmethod
-    def from_env(cls, env: Optional[dict[str, str]] = None) -> Config:
-        """Load configuration from environment variables.
+    def from_yaml(cls, yaml_path: Path, repo_path: Optional[Path] = None) -> Config:
+        """Load configuration from a YAML file.
 
         Args:
-            env: Optional dict of environment variables. Defaults to os.environ.
+            yaml_path: Path to the clover.yaml file.
+            repo_path: Optional override for repository path.
 
         Returns:
             Config instance.
 
         Raises:
-            ValueError: If required environment variables are missing.
+            ValueError: If required settings are missing or invalid.
+            FileNotFoundError: If the YAML file doesn't exist.
         """
-        if env is None:
-            env = dict(os.environ)
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f) or {}
+
+        # Interpolate environment variables in string values
+        data = _interpolate_env_vars(data)
+
+        # Extract sections
+        github = data.get("github", {})
+        daemon = data.get("daemon", {})
+        review = data.get("review", {})
+        test_config = data.get("test", {})
 
         # Required settings
-        github_token = env.get("GITHUB_TOKEN")
+        github_token = github.get("token")
         if not github_token:
-            # Try to get token from gh CLI
             github_token = _get_gh_token()
 
         if not github_token:
             raise ValueError(
-                "GITHUB_TOKEN environment variable is required, "
+                "github.token is required in clover.yaml, "
                 "or authenticate with `gh auth login`"
             )
 
-        github_repo = env.get("GITHUB_REPO")
+        github_repo = github.get("repo")
         if not github_repo:
-            raise ValueError("GITHUB_REPO environment variable is required")
+            raise ValueError("github.repo is required in clover.yaml")
 
         if "/" not in github_repo:
-            raise ValueError("GITHUB_REPO must be in format 'owner/repo'")
+            raise ValueError("github.repo must be in format 'owner/repo'")
+
+        # Determine repo path
+        if repo_path is None:
+            repo_path = yaml_path.parent.resolve()
+        else:
+            repo_path = repo_path.resolve()
 
         # Optional settings with defaults
-        poll_interval = int(env.get("POLL_INTERVAL", "60"))
-        worktree_base = Path(env.get("WORKTREE_BASE", "./worktrees"))
-        repo_path = Path(env.get("REPO_PATH", ".")).resolve()
-        clover_label = env.get("CLOVER_LABEL", "clover")
-        max_concurrent = int(env.get("MAX_CONCURRENT", "2"))
-        state_file = Path(env.get("STATE_FILE", "./.orchestrator-state.json"))
-        max_turns = int(env.get("MAX_TURNS", "50"))
+        poll_interval = daemon.get("poll_interval", 60)
+        worktree_base_str = daemon.get("worktree_base", "./worktrees")
+        worktree_base = Path(worktree_base_str)
+        clover_label = github.get("label", "clover")
+        max_concurrent = daemon.get("max_concurrent", 2)
+        state_file_str = daemon.get("state_file", "./.orchestrator-state.json")
+        state_file = Path(state_file_str)
+        max_turns = daemon.get("max_turns", 50)
 
-        # Review commands (JSON array of commands to run during PR review)
-        review_commands_raw = env.get("REVIEW_COMMANDS", "[]")
-        try:
-            review_commands = json.loads(review_commands_raw)
-            if not isinstance(review_commands, list):
-                raise ValueError("REVIEW_COMMANDS must be a JSON array")
-        except json.JSONDecodeError as e:
-            raise ValueError(f"REVIEW_COMMANDS is not valid JSON: {e}")
+        # Review commands
+        review_commands = review.get("commands", [])
+        if not isinstance(review_commands, list):
+            raise ValueError("review.commands must be a list")
+
+        # Test config
+        test = TestConfig(
+            compose_file=test_config.get("compose_file", "docker-compose.yml"),
+            container=test_config.get("container"),
+        )
 
         return cls(
             github_token=github_token,
@@ -120,13 +157,38 @@ class Config:
             state_file=state_file,
             max_turns=max_turns,
             review_commands=review_commands,
+            test=test,
         )
+
+
+def _interpolate_env_vars(data: Any) -> Any:
+    """Recursively interpolate ${VAR} patterns with environment variables.
+
+    Args:
+        data: YAML data structure (dict, list, or scalar).
+
+    Returns:
+        Data with environment variables interpolated.
+    """
+    if isinstance(data, dict):
+        return {k: _interpolate_env_vars(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_interpolate_env_vars(item) for item in data]
+    elif isinstance(data, str):
+        # Replace ${VAR} or $VAR patterns
+        def replace_var(match):
+            var_name = match.group(1) or match.group(2)
+            return os.environ.get(var_name, match.group(0))
+
+        # Match ${VAR} or $VAR (but not $$)
+        pattern = r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+        return re.sub(pattern, replace_var, data)
+    else:
+        return data
 
 
 def _get_gh_token() -> Optional[str]:
     """Try to get GitHub token from gh CLI."""
-    import subprocess
-
     try:
         result = subprocess.run(
             ["gh", "auth", "token"],
@@ -141,33 +203,52 @@ def _get_gh_token() -> Optional[str]:
     return None
 
 
-def load_config() -> Config:
-    """Load configuration from .env file and environment variables.
+def find_config_file(start_path: Optional[Path] = None) -> Optional[Path]:
+    """Find clover.yaml by searching up from start_path.
 
-    .env file values are loaded first, then environment variables override them.
+    Args:
+        start_path: Directory to start searching from. Defaults to cwd.
+
+    Returns:
+        Path to clover.yaml if found, None otherwise.
+    """
+    if start_path is None:
+        start_path = Path.cwd()
+
+    current = start_path.resolve()
+
+    # Search up to root
+    while current != current.parent:
+        config_path = current / "clover.yaml"
+        if config_path.exists():
+            return config_path
+        current = current.parent
+
+    return None
+
+
+def load_config(repo_path: Optional[Path] = None) -> Config:
+    """Load configuration from clover.yaml.
+
+    Searches for clover.yaml in the repo_path or current directory,
+    then walks up the directory tree.
+
+    Args:
+        repo_path: Optional path to the repository root.
 
     Returns:
         Config instance.
+
+    Raises:
+        ValueError: If clover.yaml is not found or invalid.
     """
-    # Try to load .env file
-    env_file = Path(".env")
-    env = dict(os.environ)
+    search_start = repo_path or Path.cwd()
+    config_path = find_config_file(search_start)
 
-    if env_file.exists():
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip()
-                    # Remove quotes if present
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = value[1:-1]
-                    # Environment variables take precedence
-                    if key not in os.environ:
-                        env[key] = value
+    if config_path is None:
+        raise ValueError(
+            f"clover.yaml not found in {search_start} or any parent directory. "
+            "Create a clover.yaml file in your repository root."
+        )
 
-    return Config.from_env(env)
+    return Config.from_yaml(config_path, repo_path=repo_path)

@@ -1,0 +1,50 @@
+# Clover configuration
+# Copy this file to clover.yaml in your repository root and customize.
+
+# GitHub settings
+github:
+  # Repository in format: owner/repo
+  repo: owner/repo-name
+
+  # GitHub token - can use environment variable
+  # If not set, Clover will try to get token from `gh auth token`
+  token: ${GITHUB_TOKEN}
+
+  # Label that triggers Clover to work on issues/PRs (default: clover)
+  label: clover
+
+# Daemon settings
+daemon:
+  # Seconds between GitHub polling (default: 60)
+  poll_interval: 60
+
+  # Maximum concurrent Claude instances (default: 2)
+  max_concurrent: 2
+
+  # Maximum turns per Claude conversation (default: 50)
+  max_turns: 50
+
+  # Base directory for worktrees (default: ./worktrees)
+  # worktree_base: ./worktrees
+
+  # State file location (default: ./.orchestrator-state.json)
+  # state_file: ./.orchestrator-state.json
+
+# Review settings - commands to run during PR review
+review:
+  commands:
+    # Examples (uncomment and customize for your project):
+    # - npm test
+    # - npm run lint
+    # - pytest
+    # - ruff check .
+
+# Test session settings - for `clover test` command
+test:
+  # Path to docker-compose file (default: docker-compose.yml)
+  compose_file: docker-compose.yml
+
+  # Container for interactive Claude sessions
+  # Leave blank to use first container.
+  # If a container named "develop" exists, it will be used by default.
+  container:
