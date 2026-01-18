@@ -289,25 +289,6 @@ class GitHubWatcher:
             logger.error(f"Failed to get PR #{pr_number} comments: {e}")
             return []
 
-    async def has_merge_comment(self, pr_number: int) -> bool:
-        """Check if a PR has the merge trigger comment.
-
-        Args:
-            pr_number: PR number.
-
-        Returns:
-            True if the merge trigger comment exists.
-        """
-        comments = await self.get_pr_comments(pr_number)
-        trigger = self.config.merge_comment_trigger
-
-        for comment in comments:
-            if trigger in comment.body:
-                logger.debug(f"Found merge trigger in PR #{pr_number}")
-                return True
-
-        return False
-
     async def get_pr_reviews(self, pr_number: int) -> list[dict]:
         """Get reviews on a pull request.
 
@@ -417,44 +398,6 @@ class GitHubWatcher:
             logger.error(f"Failed to create PR: {e}")
             raise
 
-    async def merge_pr(self, pr_number: int, commit_title: Optional[str] = None) -> bool:
-        """Merge a pull request.
-
-        Args:
-            pr_number: PR number.
-            commit_title: Optional merge commit title.
-
-        Returns:
-            True if merged successfully.
-        """
-        path = f"/repos/{self.repo}/pulls/{pr_number}/merge"
-        data = {"merge_method": "rebase"}
-        if commit_title:
-            data["commit_title"] = commit_title
-
-        try:
-            await self._request("PUT", path, json=data)
-            logger.info(f"Merged PR #{pr_number}")
-            return True
-        except GitHubError as e:
-            logger.error(f"Failed to merge PR #{pr_number}: {e}")
-            return False
-
-    async def close_issue(self, issue_number: int) -> None:
-        """Close an issue.
-
-        Args:
-            issue_number: Issue number.
-        """
-        path = f"/repos/{self.repo}/issues/{issue_number}"
-
-        try:
-            await self._request("PATCH", path, json={"state": "closed"})
-            logger.info(f"Closed issue #{issue_number}")
-        except GitHubError as e:
-            logger.error(f"Failed to close issue #{issue_number}: {e}")
-            raise
-
     async def remove_label(self, issue_number: int, label: str) -> None:
         """Remove a label from an issue.
 
@@ -488,19 +431,3 @@ class GitHubWatcher:
         except GitHubError as e:
             logger.error(f"Failed to add label: {e}")
             raise
-
-    async def delete_branch(self, branch: str) -> None:
-        """Delete a branch.
-
-        Args:
-            branch: Branch name to delete.
-        """
-        path = f"/repos/{self.repo}/git/refs/heads/{branch}"
-
-        try:
-            await self._request("DELETE", path)
-            logger.info(f"Deleted branch {branch}")
-        except GitHubError as e:
-            # 422 means branch doesn't exist or is protected
-            if e.status_code != 422:
-                logger.error(f"Failed to delete branch {branch}: {e}")

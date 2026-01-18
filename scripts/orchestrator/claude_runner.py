@@ -9,7 +9,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import Config
 
@@ -77,6 +77,7 @@ class ClaudeRunner:
         system_prompt_file: Optional[Path] = None,
         allowed_tools: Optional[list[str]] = None,
         timeout_seconds: int = 1800,  # 30 minutes default
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
     ) -> ClaudeResult:
         """Run Claude Code with a prompt.
 
@@ -86,6 +87,8 @@ class ClaudeRunner:
             system_prompt_file: Optional path to system prompt file.
             allowed_tools: List of allowed tools. Defaults to safe set.
             timeout_seconds: Maximum execution time.
+            on_output: Optional callback for output lines. Called with (line, tool_name).
+                       tool_name is set when a tool starts, None otherwise.
 
         Returns:
             ClaudeResult with output and status.
@@ -165,15 +168,34 @@ class ClaudeRunner:
                                     if item.get("type") == "text":
                                         text = item.get("text", "")[:200]
                                         if text:
-                                            logger.info(f"[Claude] {text}")
+                                            if on_output:
+                                                on_output(text, None)
+                                            else:
+                                                logger.info(f"[Claude] {text}")
                                     elif item.get("type") == "tool_use":
                                         tool = item.get("name", "unknown")
-                                        logger.info(f"[Claude] Using tool: {tool}")
+                                        if on_output:
+                                            on_output(f"Using tool: {tool}", tool)
+                                        else:
+                                            logger.info(f"[Claude] Using tool: {tool}")
                             elif msg_type == "tool_result":
                                 tool = data.get("tool_name", "unknown")
-                                logger.info(f"[Claude] Tool {tool} completed")
+                                if on_output:
+                                    on_output(f"Tool {tool} completed", None)
+                                else:
+                                    logger.info(f"[Claude] Tool {tool} completed")
                             elif msg_type == "result":
-                                logger.info(f"[Claude] Task completed")
+                                # Send the result summary through callback
+                                result_text = data.get("result", "")
+                                if on_output:
+                                    on_output("Task completed", None)
+                                    if result_text:
+                                        # Split long results into lines for display
+                                        for line in result_text.split("\n")[:15]:
+                                            if line.strip():
+                                                on_output(line[:200], None)
+                                else:
+                                    logger.info("[Claude] Task completed")
                         except json.JSONDecodeError:
                             pass  # Ignore non-JSON lines
 
@@ -323,6 +345,7 @@ class ClaudeRunner:
         issue_title: str,
         issue_body: str,
         cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
     ) -> ClaudeResult:
         """Run Claude to implement an issue.
 
@@ -331,6 +354,7 @@ class ClaudeRunner:
             issue_title: Issue title.
             issue_body: Issue body/description.
             cwd: Worktree path to work in.
+            on_output: Optional callback for output lines.
 
         Returns:
             ClaudeResult.
@@ -359,6 +383,7 @@ When done, provide a summary of what you implemented.
             prompt=prompt,
             cwd=cwd,
             system_prompt_file=system_prompt_file,
+            on_output=on_output,
         )
 
     async def review_pr(
@@ -367,6 +392,7 @@ When done, provide a summary of what you implemented.
         pr_title: str,
         pr_body: str,
         cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
     ) -> ClaudeResult:
         """Run Claude to review a PR.
 
@@ -375,6 +401,7 @@ When done, provide a summary of what you implemented.
             pr_title: PR title.
             pr_body: PR body/description.
             cwd: Worktree path with PR code.
+            on_output: Optional callback for output lines.
 
         Returns:
             ClaudeResult.
@@ -412,6 +439,7 @@ Format your review as markdown with sections for:
             prompt=prompt,
             cwd=cwd,
             system_prompt_file=system_prompt_file,
+            on_output=on_output,
             # Review doesn't need write access
             allowed_tools=["Bash", "Read", "Glob", "Grep"],
         )

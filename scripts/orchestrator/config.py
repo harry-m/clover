@@ -38,12 +38,8 @@ class Config:
     # Claude settings
     max_turns: int = 50
 
-    # Merge settings
-    auto_merge_enabled: bool = True
-    merge_comment_trigger: str = "/merge"
-
-    # Pre-merge checks (list of commands that must pass)
-    pre_merge_commands: list[str] = field(default_factory=list)
+    # Review checks (list of commands to run during PR review)
+    review_commands: list[str] = field(default_factory=list)
 
     # Prompts directory
     prompts_dir: Path = field(
@@ -104,18 +100,14 @@ class Config:
         state_file = Path(env.get("STATE_FILE", "./.orchestrator-state.json"))
         max_turns = int(env.get("MAX_TURNS", "50"))
 
-        # Merge settings
-        auto_merge_enabled = env.get("AUTO_MERGE_ENABLED", "true").lower() == "true"
-        merge_comment_trigger = env.get("MERGE_COMMENT_TRIGGER", "/merge")
-
-        # Pre-merge commands (JSON array)
-        pre_merge_commands_raw = env.get("PRE_MERGE_COMMANDS", "[]")
+        # Review commands (JSON array of commands to run during PR review)
+        review_commands_raw = env.get("REVIEW_COMMANDS", "[]")
         try:
-            pre_merge_commands = json.loads(pre_merge_commands_raw)
-            if not isinstance(pre_merge_commands, list):
-                raise ValueError("PRE_MERGE_COMMANDS must be a JSON array")
+            review_commands = json.loads(review_commands_raw)
+            if not isinstance(review_commands, list):
+                raise ValueError("REVIEW_COMMANDS must be a JSON array")
         except json.JSONDecodeError as e:
-            raise ValueError(f"PRE_MERGE_COMMANDS is not valid JSON: {e}")
+            raise ValueError(f"REVIEW_COMMANDS is not valid JSON: {e}")
 
         return cls(
             github_token=github_token,
@@ -127,9 +119,7 @@ class Config:
             max_concurrent=max_concurrent,
             state_file=state_file,
             max_turns=max_turns,
-            auto_merge_enabled=auto_merge_enabled,
-            merge_comment_trigger=merge_comment_trigger,
-            pre_merge_commands=pre_merge_commands,
+            review_commands=review_commands,
         )
 
 

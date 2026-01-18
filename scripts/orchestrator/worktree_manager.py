@@ -52,6 +52,8 @@ class WorktreeManager:
         else:
             # Put worktrees as sibling to repo (e.g., ../dashai-worktrees)
             self.worktree_base = self.repo_path.parent / f"{self.repo_path.name}-worktrees"
+        # Lock to serialize worktree operations (git config can't handle concurrent writes)
+        self._worktree_lock = asyncio.Lock()
 
     async def _run_git(
         self, *args: str, cwd: Optional[Path] = None, check: bool = True
@@ -113,6 +115,19 @@ class WorktreeManager:
         Raises:
             WorktreeError: If worktree creation fails.
         """
+        # Serialize worktree operations to avoid git config lock contention
+        async with self._worktree_lock:
+            return await self._create_worktree_impl(
+                branch_name, base_branch, checkout_existing
+            )
+
+    async def _create_worktree_impl(
+        self,
+        branch_name: str,
+        base_branch: str,
+        checkout_existing: bool,
+    ) -> Worktree:
+        """Internal implementation of create_worktree (called with lock held)."""
         # Ensure base directory exists
         self.worktree_base.mkdir(parents=True, exist_ok=True)
 
@@ -204,38 +219,40 @@ class WorktreeManager:
         Returns:
             Worktree instance.
         """
-        worktree_name = f"pr-review-{pr_number}"
-        safe_name = worktree_name.replace("/", "-")
-        worktree_path = self.worktree_base / safe_name
+        # Serialize worktree operations to avoid git config lock contention
+        async with self._worktree_lock:
+            worktree_name = f"pr-review-{pr_number}"
+            safe_name = worktree_name.replace("/", "-")
+            worktree_path = self.worktree_base / safe_name
 
-        # Ensure base directory exists
-        self.worktree_base.mkdir(parents=True, exist_ok=True)
+            # Ensure base directory exists
+            self.worktree_base.mkdir(parents=True, exist_ok=True)
 
-        # Check if worktree already exists
-        if worktree_path.exists():
-            logger.warning(f"Worktree already exists at {worktree_path}, removing")
-            await self.cleanup_worktree(worktree_path)
+            # Check if worktree already exists
+            if worktree_path.exists():
+                logger.warning(f"Worktree already exists at {worktree_path}, removing")
+                await self.cleanup_worktree(worktree_path)
 
-        # Fetch the PR branch
-        await self._run_git("fetch", "origin", branch_name)
+            # Fetch the PR branch
+            await self._run_git("fetch", "origin", branch_name)
 
-        # Create worktree at the PR branch
-        await self._run_git(
-            "worktree",
-            "add",
-            str(worktree_path),
-            f"origin/{branch_name}",
-        )
+            # Create worktree at the PR branch
+            await self._run_git(
+                "worktree",
+                "add",
+                str(worktree_path),
+                f"origin/{branch_name}",
+            )
 
-        # Get the current commit
-        _, commit, _ = await self._run_git("rev-parse", "HEAD", cwd=worktree_path)
+            # Get the current commit
+            _, commit, _ = await self._run_git("rev-parse", "HEAD", cwd=worktree_path)
 
-        logger.info(
-            f"Created worktree for PR #{pr_number} at {worktree_path} "
-            f"on branch {branch_name}"
-        )
+            logger.info(
+                f"Created worktree for PR #{pr_number} at {worktree_path} "
+                f"on branch {branch_name}"
+            )
 
-        return Worktree(path=worktree_path, branch=branch_name, commit=commit)
+            return Worktree(path=worktree_path, branch=branch_name, commit=commit)
 
     async def cleanup_worktree(self, worktree_path: Path) -> None:
         """Remove a worktree and clean up.

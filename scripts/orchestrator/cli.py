@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
-from pathlib import Path
 
 from .config import load_config
-from .state import State, WorkItemType, WorkItemStatus
-from .main import Orchestrator, async_main
+from .main import async_main
+from .state import State, WorkItemStatus, WorkItemType
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -38,7 +36,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     state = State(config.state_file)
 
-    print(f"Clover Status")
+    print("Clover Status")
     print(f"{'=' * 50}")
     print(f"Repository: {config.github_repo}")
     print(f"State file: {config.state_file}")
@@ -114,12 +112,11 @@ def cmd_clear(args: argparse.Namespace) -> int:
         "feature": WorkItemType.ISSUE,  # synonym
         "review": WorkItemType.PR_REVIEW,
         "pr": WorkItemType.PR_REVIEW,  # synonym
-        "merge": WorkItemType.PR_MERGE,
     }
 
     if args.type not in item_type_map:
         print(f"Unknown type: {args.type}")
-        print(f"Valid types: issue (or feature), review (or pr), merge")
+        print("Valid types: issue (or feature), review (or pr)")
         return 1
 
     item_type = item_type_map[args.type]
@@ -144,15 +141,12 @@ def _clear_all(state: State) -> int:
     # Build summary
     issues = []
     reviews = []
-    merges = []
 
     for item in state.work_items.values():
         if item.item_type == WorkItemType.ISSUE:
             issues.append(item)
         elif item.item_type == WorkItemType.PR_REVIEW:
             reviews.append(item)
-        elif item.item_type == WorkItemType.PR_MERGE:
-            merges.append(item)
 
     # Display summary
     print("This will clear ALL state (blank slate):")
@@ -164,10 +158,6 @@ def _clear_all(state: State) -> int:
     if reviews:
         print(f"  PR Reviews ({len(reviews)}):")
         for item in reviews:
-            print(f"    - #{item.number} ({item.status.value})")
-    if merges:
-        print(f"  PR Merges ({len(merges)}):")
-        for item in merges:
             print(f"    - #{item.number} ({item.status.value})")
     print()
     print(f"Total: {len(state.work_items)} items will be cleared.")
@@ -207,15 +197,13 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"Worktree base:   {config.worktree_base}")
     print(f"State file:      {config.state_file}")
     print()
-    print("Merge Settings:")
-    print(f"  Auto-merge:    {'enabled' if config.auto_merge_enabled else 'disabled'}")
-    print(f"  Trigger:       {config.merge_comment_trigger}")
-    if config.pre_merge_commands:
-        print(f"  Pre-merge checks:")
-        for cmd in config.pre_merge_commands:
+    print("Review Settings:")
+    if config.review_commands:
+        print("  Review checks:")
+        for cmd in config.review_commands:
             print(f"    - {cmd}")
     else:
-        print(f"  Pre-merge checks: none configured")
+        print("  Review checks: none configured")
 
     return 0
 
@@ -246,9 +234,20 @@ def main() -> int:
         action="store_true",
         help="Run one poll cycle and exit",
     )
+    run_parser.add_argument(
+        "--tui",
+        action="store_true",
+        default=None,
+        help="Enable rich terminal UI (default when TTY)",
+    )
+    run_parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        help="Disable rich terminal UI",
+    )
 
     # Status command
-    status_parser = subparsers.add_parser("status", help="Show current state")
+    subparsers.add_parser("status", help="Show current state")
 
     # Clear command
     clear_parser = subparsers.add_parser("clear", help="Clear state for re-processing")
@@ -260,7 +259,7 @@ def main() -> int:
     clear_parser.add_argument(
         "type",
         nargs="?",
-        choices=["issue", "feature", "review", "pr", "merge"],
+        choices=["issue", "feature", "review", "pr"],
         help="Type of item to clear (feature=issue, pr=review)",
     )
     clear_parser.add_argument(
@@ -271,7 +270,7 @@ def main() -> int:
     )
 
     # Config command
-    config_parser = subparsers.add_parser("config", help="Show configuration")
+    subparsers.add_parser("config", help="Show configuration")
 
     args = parser.parse_args()
 
@@ -300,6 +299,8 @@ def main() -> int:
         # Otherwise, treat as run command
         args.verbose = "-v" in sys.argv or "--verbose" in sys.argv
         args.once = "--once" in sys.argv
+        args.tui = "--tui" in sys.argv
+        args.no_tui = "--no-tui" in sys.argv
         return cmd_run(args)
 
 

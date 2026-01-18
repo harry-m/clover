@@ -11,11 +11,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .config import load_config, Config
-from .state import State, WorkItemType
-from .github_watcher import GitHubWatcher, Issue, PullRequest
-from .worktree_manager import WorktreeManager, WorktreeError
+from .agent_context import AgentContext
 from .claude_runner import ClaudeRunner, ClaudeRunnerError
+from .config import Config, load_config
+from .github_watcher import GitHubWatcher, Issue, PullRequest
+from .state import State, WorkItemType
+from .tui import CloverDisplay, is_tty
+from .worktree_manager import WorktreeManager
 
 # Configure logging
 logging.basicConfig(
@@ -29,13 +31,15 @@ logger = logging.getLogger(__name__)
 class Orchestrator:
     """Main orchestrator daemon that coordinates all components."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, display: Optional[CloverDisplay] = None):
         """Initialize the orchestrator.
 
         Args:
             config: Orchestrator configuration.
+            display: Optional TUI display for rich output.
         """
         self.config = config
+        self.display = display
         self.state = State(config.state_file)
         self.github = GitHubWatcher(config)
         self.worktrees = WorktreeManager(config, repo_path=config.repo_path)
@@ -43,17 +47,23 @@ class Orchestrator:
         self._shutdown = False
         self._active_tasks: set[asyncio.Task] = set()
 
+    def _log(self, message: str) -> None:
+        """Log a message to both logger and display.
+
+        Args:
+            message: Message to log.
+        """
+        logger.info(message)
+        if self.display:
+            self.display.log(message)
+            self.display.refresh()
+
     async def start(self) -> None:
         """Start the orchestrator daemon."""
-        logger.info(f"Starting Clover for {self.config.github_repo}")
-        logger.info(f"Watching for issues/PRs with label: {self.config.clover_label}")
+        self._log(f"Starting Clover for {self.config.github_repo}")
+        self._log(f"Watching for label: {self.config.clover_label}")
         logger.info(f"Poll interval: {self.config.poll_interval}s")
         logger.info(f"Max concurrent: {self.config.max_concurrent}")
-
-        if self.config.auto_merge_enabled:
-            logger.info(f"Auto-merge enabled, trigger: {self.config.merge_comment_trigger}")
-            if self.config.pre_merge_commands:
-                logger.info(f"Pre-merge commands: {self.config.pre_merge_commands}")
 
         # Reset any in-progress items from previous runs so they can be resumed
         # (the branch detection logic will handle resuming work properly)
@@ -111,7 +121,7 @@ class Orchestrator:
                 break
 
             if not self.state.is_processing(WorkItemType.ISSUE, issue.number):
-                logger.info(f"Found issue #{issue.number}: {issue.title}")
+                self._log(f"Found issue #{issue.number}: {issue.title}")
                 task = asyncio.create_task(self._process_issue(issue))
                 self._active_tasks.add(task)
                 task.add_done_callback(self._active_tasks.discard)
@@ -127,23 +137,11 @@ class Orchestrator:
                 continue
 
             if not self.state.is_processing(WorkItemType.PR_REVIEW, pr.number):
-                logger.info(f"Found PR needing review #{pr.number}: {pr.title}")
+                self._log(f"Found PR #{pr.number}: {pr.title}")
                 task = asyncio.create_task(self._process_pr_review(pr))
                 self._active_tasks.add(task)
                 task.add_done_callback(self._active_tasks.discard)
                 available_slots -= 1
-
-        # Check for PRs with merge trigger
-        if self.config.auto_merge_enabled:
-            for pr in prs:
-                if self.state.is_processing(WorkItemType.PR_MERGE, pr.number):
-                    continue
-
-                if await self.github.has_merge_comment(pr.number):
-                    logger.info(f"Found PR with merge trigger #{pr.number}")
-                    task = asyncio.create_task(self._process_pr_merge(pr))
-                    self._active_tasks.add(task)
-                    task.add_done_callback(self._active_tasks.discard)
 
     def _should_review_pr(self, pr: PullRequest) -> bool:
         """Check if Clover should review this PR.
@@ -164,11 +162,21 @@ class Orchestrator:
         """
         branch_name = f"clover/issue-{issue.number}"
         worktree = None
+        agent: Optional[AgentContext] = None
+
+        # Create agent for TUI tracking
+        if self.display:
+            agent = self.display.create_agent(
+                work_type="issue",
+                number=issue.number,
+                title=issue.title,
+                branch_name=branch_name,
+            )
+            self.display.refresh()
 
         try:
             # Check if branch already exists (locally or on remote)
             branch_exists = await self.worktrees.branch_exists(branch_name)
-            existing_item = self.state.get_item(WorkItemType.ISSUE, issue.number)
 
             if branch_exists:
                 # Branch exists - assume we were working on it, resume
@@ -204,22 +212,24 @@ class Orchestrator:
             if checkout_existing:
                 await self.github.post_comment(
                     issue.number,
-                    f"🔄 Resuming work on this issue...\n\n"
-                    f"*— Clover, the Claude Overseer*",
+                    "🔄 Resuming work on this issue...\n\n"
+                    "*— Clover, the Claude Overseer*",
                 )
             else:
                 await self.github.post_comment(
                     issue.number,
-                    f"🚀 Starting work on this issue...\n\n"
-                    f"*— Clover, the Claude Overseer*",
+                    "🚀 Starting work on this issue...\n\n"
+                    "*— Clover, the Claude Overseer*",
                 )
 
             # Run Claude to implement
+            on_output = self.display.get_output_callback(agent) if agent else None
             result = await self.claude.implement_issue(
                 issue_number=issue.number,
                 issue_title=issue.title,
                 issue_body=issue.body,
                 cwd=worktree.path,
+                on_output=on_output,
             )
 
             if not result.success:
@@ -301,11 +311,16 @@ class Orchestrator:
 
             # Mark completed
             self.state.mark_completed(WorkItemType.ISSUE, issue.number)
-            logger.info(f"Created PR #{pr.number} for issue #{issue.number}")
+            self._log(f"Created PR #{pr.number} for issue #{issue.number}")
+            if agent:
+                agent.mark_completed()
 
         except Exception as e:
             logger.error(f"Failed to process issue #{issue.number}: {e}")
             self.state.mark_failed(WorkItemType.ISSUE, issue.number, str(e))
+            if agent:
+                agent.mark_failed()
+                agent.add_output(f"Error: {str(e)[:100]}")
 
             # Post error comment on issue
             try:
@@ -325,6 +340,9 @@ class Orchestrator:
                     await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
+            # Refresh display
+            if self.display:
+                self.display.refresh()
 
     async def _process_pr_review(self, pr: PullRequest) -> None:
         """Process a PR by reviewing it.
@@ -333,6 +351,17 @@ class Orchestrator:
             pr: PR to review.
         """
         worktree = None
+        agent: Optional[AgentContext] = None
+
+        # Create agent for TUI tracking
+        if self.display:
+            agent = self.display.create_agent(
+                work_type="pr_review",
+                number=pr.number,
+                title=pr.title,
+                branch_name=pr.branch,
+            )
+            self.display.refresh()
 
         try:
             # Mark as in progress
@@ -341,25 +370,36 @@ class Orchestrator:
             # Post start comment
             await self.github.post_comment(
                 pr.number,
-                f"🔍 Starting code review...\n\n"
-                f"*— Clover, the Claude Overseer*",
+                "🔍 Starting code review...\n\n"
+                "*— Clover, the Claude Overseer*",
             )
 
             # Create worktree at PR branch
             worktree = await self.worktrees.checkout_pr_branch(pr.number, pr.branch)
 
+            # Run review checks if configured
+            checks_output = ""
+            if self.config.review_commands:
+                checks_passed, check_output = await self.claude.run_checks(
+                    commands=self.config.review_commands,
+                    cwd=worktree.path,
+                )
+                checks_output = f"## 🔧 Review Checks\n\n{check_output}\n\n"
+
             # Run Claude review
+            on_output = self.display.get_output_callback(agent) if agent else None
             result = await self.claude.review_pr(
                 pr_number=pr.number,
                 pr_title=pr.title,
                 pr_body=pr.body,
                 cwd=worktree.path,
+                on_output=on_output,
             )
 
             # Post review as comment
             review_comment = f"""## 🤖 Automated Code Review
 
-{result.output[:4000]}
+{checks_output}{result.output[:4000]}
 
 ---
 *— Clover, the Claude Overseer*
@@ -368,11 +408,16 @@ class Orchestrator:
 
             # Mark completed
             self.state.mark_completed(WorkItemType.PR_REVIEW, pr.number)
-            logger.info(f"Posted review for PR #{pr.number}")
+            self._log(f"Posted review for PR #{pr.number}")
+            if agent:
+                agent.mark_completed()
 
         except Exception as e:
             logger.error(f"Failed to review PR #{pr.number}: {e}")
             self.state.mark_failed(WorkItemType.PR_REVIEW, pr.number, str(e))
+            if agent:
+                agent.mark_failed()
+                agent.add_output(f"Error: {str(e)[:100]}")
 
         finally:
             # Cleanup worktree
@@ -381,109 +426,9 @@ class Orchestrator:
                     await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
-
-    async def _process_pr_merge(self, pr: PullRequest) -> None:
-        """Process a PR merge request.
-
-        Args:
-            pr: PR to merge.
-        """
-        worktree = None
-
-        try:
-            # Mark as in progress
-            self.state.mark_in_progress(WorkItemType.PR_MERGE, pr.number)
-
-            # Post start comment
-            await self.github.post_comment(
-                pr.number,
-                f"🔄 Starting merge process...\n\n"
-                f"*— Clover, the Claude Overseer*",
-            )
-
-            # Run pre-merge checks if configured
-            if self.config.pre_merge_commands:
-                # Create worktree to run checks
-                worktree = await self.worktrees.checkout_pr_branch(pr.number, pr.branch)
-
-                checks_passed, check_output = await self.claude.run_checks(
-                    commands=self.config.pre_merge_commands,
-                    cwd=worktree.path,
-                )
-
-                if not checks_passed:
-                    await self.github.post_comment(
-                        pr.number,
-                        f"❌ Pre-merge checks failed. Cannot merge.\n\n"
-                        f"## Check Results\n\n{check_output}\n\n"
-                        f"*— Clover, the Claude Overseer*",
-                    )
-                    self.state.mark_failed(
-                        WorkItemType.PR_MERGE, pr.number, "Pre-merge checks failed"
-                    )
-                    return
-
-                # Post success message
-                await self.github.post_comment(
-                    pr.number,
-                    f"✅ Pre-merge checks passed.\n\n"
-                    f"## Check Results\n\n{check_output}\n\n"
-                    f"Proceeding with merge...\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-
-            # Check GitHub CI status
-            ci_passed, ci_status = await self.github.get_pr_check_status(pr.number)
-            if not ci_passed:
-                await self.github.post_comment(
-                    pr.number,
-                    f"❌ GitHub checks not passing: {ci_status}\n\n"
-                    f"Please fix the failing checks before merging.\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-                self.state.mark_failed(
-                    WorkItemType.PR_MERGE, pr.number, f"CI checks failed: {ci_status}"
-                )
-                return
-
-            # Merge the PR
-            merged = await self.github.merge_pr(pr.number)
-
-            if merged:
-                # Delete the branch
-                await self.github.delete_branch(pr.branch)
-
-                # Close linked issue if any
-                if pr.linked_issue:
-                    await self.github.close_issue(pr.linked_issue)
-
-                self.state.mark_completed(WorkItemType.PR_MERGE, pr.number)
-                logger.info(f"Merged PR #{pr.number}")
-            else:
-                self.state.mark_failed(
-                    WorkItemType.PR_MERGE, pr.number, "Merge failed"
-                )
-
-        except Exception as e:
-            logger.error(f"Failed to merge PR #{pr.number}: {e}")
-            self.state.mark_failed(WorkItemType.PR_MERGE, pr.number, str(e))
-
-            try:
-                await self.github.post_comment(
-                    pr.number,
-                    f"❌ Failed to merge.\n\nError: {str(e)[:500]}\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-            except Exception:
-                pass
-
-        finally:
-            # Cleanup worktree
-            if worktree:
-                try:
-                    await self.worktrees.cleanup_worktree(worktree.path)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup worktree: {e}")
+            # Refresh display
+            if self.display:
+                self.display.refresh()
 
 
 def parse_args() -> argparse.Namespace:
@@ -507,6 +452,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run one poll cycle and exit (useful for testing)",
     )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        default=None,
+        help="Enable rich terminal UI (default when TTY)",
+    )
+    parser.add_argument(
+        "--no-tui",
+        action="store_true",
+        help="Disable rich terminal UI",
+    )
     return parser.parse_args()
 
 
@@ -519,8 +475,23 @@ async def async_main(args: argparse.Namespace) -> int:
         logger.error(f"Configuration error: {e}")
         return 1
 
+    # Determine if TUI should be enabled
+    use_tui = False
+    if hasattr(args, "no_tui") and args.no_tui:
+        use_tui = False
+    elif hasattr(args, "tui") and args.tui:
+        use_tui = True
+    elif is_tty() and not getattr(args, "once", False):
+        # Auto-enable TUI for interactive sessions (but not --once mode)
+        use_tui = True
+
+    # Create display if TUI is enabled
+    display: Optional[CloverDisplay] = None
+    if use_tui:
+        display = CloverDisplay(config)
+
     # Create orchestrator
-    orchestrator = Orchestrator(config)
+    orchestrator = Orchestrator(config, display=display)
 
     # Set up signal handlers
     loop = asyncio.get_event_loop()
@@ -536,21 +507,30 @@ async def async_main(args: argparse.Namespace) -> int:
             pass
 
     # Run
-    if args.once:
-        logger.info("Running single poll cycle")
-        # Reset in-progress items so they can be resumed
-        reset = orchestrator.state.reset_in_progress_items()
-        if reset:
-            logger.info(f"Reset {reset} in-progress items for resumption")
-        orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
-        await orchestrator._poll_cycle()
-        # Wait for all tasks to complete
-        if orchestrator._active_tasks:
-            logger.info(f"Waiting for {len(orchestrator._active_tasks)} task(s) to complete...")
-            await asyncio.gather(*orchestrator._active_tasks, return_exceptions=True)
-        await orchestrator._cleanup()
-    else:
-        await orchestrator.start()
+    try:
+        # Start TUI display if enabled
+        if display:
+            display.start()
+
+        if args.once:
+            logger.info("Running single poll cycle")
+            # Reset in-progress items so they can be resumed
+            reset = orchestrator.state.reset_in_progress_items()
+            if reset:
+                logger.info(f"Reset {reset} in-progress items for resumption")
+            orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
+            await orchestrator._poll_cycle()
+            # Wait for all tasks to complete
+            if orchestrator._active_tasks:
+                logger.info(f"Waiting for {len(orchestrator._active_tasks)} task(s) to complete...")
+                await asyncio.gather(*orchestrator._active_tasks, return_exceptions=True)
+            await orchestrator._cleanup()
+        else:
+            await orchestrator.start()
+    finally:
+        # Stop TUI display
+        if display:
+            display.stop()
 
     return 0
 
