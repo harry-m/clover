@@ -224,7 +224,7 @@ def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="clover",
-        description="Clover - Claude's Little Observer, Validator, and Executor of Requests",
+        description="Clover, the Claude Overseer",
     )
     parser.add_argument(
         "--version", "-V",

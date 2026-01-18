@@ -46,11 +46,12 @@ class WorktreeManager:
         """
         self.config = config
         self.repo_path = repo_path or Path.cwd()
-        # Resolve worktree_base relative to repo_path if it's a relative path
+        # Resolve worktree_base - default to sibling of repo, not inside it
         if config.worktree_base.is_absolute():
             self.worktree_base = config.worktree_base
         else:
-            self.worktree_base = self.repo_path / config.worktree_base
+            # Put worktrees as sibling to repo (e.g., ../dashai-worktrees)
+            self.worktree_base = self.repo_path.parent / f"{self.repo_path.name}-worktrees"
 
     async def _run_git(
         self, *args: str, cwd: Optional[Path] = None, check: bool = True
@@ -115,6 +116,9 @@ class WorktreeManager:
         # Ensure base directory exists
         self.worktree_base.mkdir(parents=True, exist_ok=True)
 
+        # Prune stale worktree references
+        await self._run_git("worktree", "prune", check=False)
+
         # Create worktree path from branch name (replace / with -)
         safe_name = branch_name.replace("/", "-")
         worktree_path = self.worktree_base / safe_name
@@ -126,6 +130,18 @@ class WorktreeManager:
 
         # Fetch latest from remote to ensure we have the base branch
         await self._run_git("fetch", "origin", base_branch, check=False)
+
+        # Check if the branch is currently checked out in the main repo
+        # (git won't allow the same branch in multiple worktrees)
+        _, current_branch, _ = await self._run_git(
+            "rev-parse", "--abbrev-ref", "HEAD", check=False
+        )
+        if current_branch.strip() == branch_name:
+            logger.info(
+                f"Branch {branch_name} is checked out in main repo, "
+                f"switching to {base_branch} first"
+            )
+            await self._run_git("checkout", base_branch, check=False)
 
         if checkout_existing:
             # Try to fetch from remote first
@@ -321,6 +337,37 @@ class WorktreeManager:
             return count > 0
         except ValueError:
             return False
+
+    async def has_uncommitted_changes(self, worktree_path: Path) -> bool:
+        """Check if there are uncommitted changes in the worktree.
+
+        Args:
+            worktree_path: Path to the worktree.
+
+        Returns:
+            True if there are uncommitted changes (staged or unstaged).
+        """
+        # Check for any changes (staged or unstaged)
+        _, output, _ = await self._run_git(
+            "status", "--porcelain",
+            cwd=worktree_path, check=False
+        )
+        return bool(output.strip())
+
+    async def get_uncommitted_status(self, worktree_path: Path) -> str:
+        """Get a summary of uncommitted changes.
+
+        Args:
+            worktree_path: Path to the worktree.
+
+        Returns:
+            Git status output showing uncommitted changes.
+        """
+        _, output, _ = await self._run_git(
+            "status", "--short",
+            cwd=worktree_path, check=False
+        )
+        return output
 
     async def push_branch(self, worktree_path: Path, branch_name: str) -> None:
         """Push a branch to origin.

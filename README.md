@@ -163,7 +163,7 @@ clover clear merge 7
 
 ### Workflow: Implementing Issues
 
-1. **Create an issue** on GitHub with a clear description of what needs to be implemented
+1. **Create an issue** on GitHub with a clear description of what needs to be implemented. If you want to, Claude can help write it in Plan mode, and you can post the plan as an issue.
 
 2. **Add the `ready` label** (or your configured label) to the issue
 

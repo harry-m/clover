@@ -55,10 +55,11 @@ class Orchestrator:
             if self.config.pre_merge_commands:
                 logger.info(f"Pre-merge commands: {self.config.pre_merge_commands}")
 
-        # Clean up any stale items from previous runs
-        cleaned = self.state.cleanup_stale_items()
-        if cleaned:
-            logger.info(f"Cleaned up {cleaned} stale work items")
+        # Reset any in-progress items from previous runs so they can be resumed
+        # (the branch detection logic will handle resuming work properly)
+        reset = self.state.reset_in_progress_items()
+        if reset:
+            logger.info(f"Reset {reset} in-progress items for resumption")
 
         # Get default branch for creating feature branches
         self._default_branch = await self.worktrees.get_default_branch()
@@ -199,6 +200,20 @@ class Orchestrator:
                 branch_name=branch_name,
             )
 
+            # Post start/resume comment
+            if checkout_existing:
+                await self.github.post_comment(
+                    issue.number,
+                    f"🔄 Resuming work on this issue...\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+            else:
+                await self.github.post_comment(
+                    issue.number,
+                    f"🚀 Starting work on this issue...\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+
             # Run Claude to implement
             result = await self.claude.implement_issue(
                 issue_number=issue.number,
@@ -216,6 +231,24 @@ class Orchestrator:
             )
 
             if not has_commits:
+                # Check if there are uncommitted changes (Claude made changes but didn't commit)
+                has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+
+                if has_uncommitted:
+                    # Claude made changes but didn't commit them - this is an error
+                    uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
+                    logger.error(
+                        f"Issue #{issue.number}: Claude made changes but didn't commit them!\n"
+                        f"Uncommitted changes:\n{uncommitted_status}"
+                    )
+                    # Don't clean up the worktree so user can inspect/recover
+                    worktree = None  # Prevent cleanup in finally block
+                    raise ClaudeRunnerError(
+                        f"Claude made file changes but didn't commit them. "
+                        f"Worktree preserved for inspection. "
+                        f"Uncommitted files:\n{uncommitted_status[:500]}"
+                    )
+
                 logger.info(f"No commits made for issue #{issue.number}, nothing to push")
                 await self.github.post_comment(
                     issue.number,
@@ -223,6 +256,9 @@ class Orchestrator:
                     f"Claude's response:\n\n{result.output[:1000]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
+                # Remove clover label and add clover-complete
+                await self.github.remove_label(issue.number, self.config.clover_label)
+                await self.github.add_label(issue.number, "clover-complete")
                 self.state.mark_completed(WorkItemType.ISSUE, issue.number)
                 return
 
@@ -249,8 +285,19 @@ class Orchestrator:
             # Add clover label to PR so Clover will review it
             await self.github.add_label(pr.number, self.config.clover_label)
 
-            # Remove clover label from issue
+            # Remove clover label from issue and add clover-complete
             await self.github.remove_label(issue.number, self.config.clover_label)
+            await self.github.add_label(issue.number, "clover-complete")
+
+            # Post completion comment on issue with PR link
+            pr_url = f"https://github.com/{self.config.github_repo}/pull/{pr.number}"
+            await self.github.post_comment(
+                issue.number,
+                f"✅ Finished working on this issue.\n\n"
+                f"**Summary:** {result.output[:500]}\n\n"
+                f"**Pull Request:** {pr_url}\n\n"
+                f"*— Clover, the Claude Overseer*",
+            )
 
             # Mark completed
             self.state.mark_completed(WorkItemType.ISSUE, issue.number)
@@ -290,6 +337,13 @@ class Orchestrator:
         try:
             # Mark as in progress
             self.state.mark_in_progress(WorkItemType.PR_REVIEW, pr.number)
+
+            # Post start comment
+            await self.github.post_comment(
+                pr.number,
+                f"🔍 Starting code review...\n\n"
+                f"*— Clover, the Claude Overseer*",
+            )
 
             # Create worktree at PR branch
             worktree = await self.worktrees.checkout_pr_branch(pr.number, pr.branch)
@@ -339,6 +393,13 @@ class Orchestrator:
         try:
             # Mark as in progress
             self.state.mark_in_progress(WorkItemType.PR_MERGE, pr.number)
+
+            # Post start comment
+            await self.github.post_comment(
+                pr.number,
+                f"🔄 Starting merge process...\n\n"
+                f"*— Clover, the Claude Overseer*",
+            )
 
             # Run pre-merge checks if configured
             if self.config.pre_merge_commands:
@@ -477,6 +538,10 @@ async def async_main(args: argparse.Namespace) -> int:
     # Run
     if args.once:
         logger.info("Running single poll cycle")
+        # Reset in-progress items so they can be resumed
+        reset = orchestrator.state.reset_in_progress_items()
+        if reset:
+            logger.info(f"Reset {reset} in-progress items for resumption")
         orchestrator._default_branch = await orchestrator.worktrees.get_default_branch()
         await orchestrator._poll_cycle()
         # Wait for all tasks to complete

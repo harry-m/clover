@@ -105,11 +105,12 @@ class ClaudeRunner:
         claude_cli = _find_claude_cli()
         logger.debug(f"Using Claude CLI: {claude_cli}")
 
-        # Build command
+        # Build command - use stream-json for real-time visibility
         cmd = [
             claude_cli,
             "-p",  # Print mode (non-interactive)
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--verbose",
             "--max-turns", str(self.config.max_turns),
             "--permission-mode", "acceptEdits",
             "--allowedTools", ",".join(allowed_tools),
@@ -134,11 +135,58 @@ class ClaudeRunner:
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Increase buffer limit to 10MB to handle large stream-json lines
+                # (default is 64KB which fails on large tool outputs)
+                limit=10 * 1024 * 1024,
             )
 
+            # Stream stdout to show Claude's activity in real-time
+            stdout_chunks = []
+            stderr_chunks = []
+
+            async def read_stdout():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    stdout_chunks.append(line)
+                    line_str = line.decode().rstrip()
+                    if line_str:
+                        # Parse stream-json and log meaningful activity
+                        try:
+                            data = json.loads(line_str)
+                            msg_type = data.get("type", "")
+
+                            if msg_type == "assistant":
+                                # Extract text from assistant messages
+                                msg = data.get("message", {})
+                                content = msg.get("content", [])
+                                for item in content:
+                                    if item.get("type") == "text":
+                                        text = item.get("text", "")[:200]
+                                        if text:
+                                            logger.info(f"[Claude] {text}")
+                                    elif item.get("type") == "tool_use":
+                                        tool = item.get("name", "unknown")
+                                        logger.info(f"[Claude] Using tool: {tool}")
+                            elif msg_type == "tool_result":
+                                tool = data.get("tool_name", "unknown")
+                                logger.info(f"[Claude] Tool {tool} completed")
+                            elif msg_type == "result":
+                                logger.info(f"[Claude] Task completed")
+                        except json.JSONDecodeError:
+                            pass  # Ignore non-JSON lines
+
+            async def read_stderr():
+                while True:
+                    chunk = await proc.stderr.read(4096)
+                    if not chunk:
+                        break
+                    stderr_chunks.append(chunk)
+
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
+                await asyncio.wait_for(
+                    asyncio.gather(read_stdout(), read_stderr(), proc.wait()),
                     timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
@@ -152,31 +200,28 @@ class ClaudeRunner:
 
             duration = time.time() - start_time
 
-            stdout_str = stdout.decode()
-            stderr_str = stderr.decode()
+            stdout_str = b"".join(stdout_chunks).decode()
+            stderr_str = b"".join(stderr_chunks).decode()
 
-            # Try to parse JSON output
-            result_data = None
+            # Parse stream-json to extract final result
+            output = ""
             cost_usd = None
             session_id = None
 
-            if stdout_str:
+            for line in stdout_str.strip().split("\n"):
+                if not line:
+                    continue
                 try:
-                    # Claude outputs JSON when --output-format json is used
-                    result_data = json.loads(stdout_str)
-                    cost_usd = result_data.get("cost_usd")
-                    session_id = result_data.get("session_id")
+                    data = json.loads(line)
+                    if data.get("type") == "result":
+                        output = data.get("result", "")
+                        cost_usd = data.get("total_cost_usd")
+                        session_id = data.get("session_id")
                 except json.JSONDecodeError:
-                    # Not JSON, just use raw output
                     pass
 
-            # Determine output text
-            if result_data and "result" in result_data:
-                output = result_data["result"]
-            elif result_data and "error" in result_data:
-                output = result_data["error"]
-            else:
-                output = stdout_str or stderr_str
+            if not output:
+                output = stderr_str or "No output"
 
             success = proc.returncode == 0
 
@@ -303,7 +348,7 @@ Instructions:
 2. Explore the codebase to understand the relevant code
 3. Implement the feature or fix
 4. Write or update tests if appropriate
-5. Commit your changes with a clear commit message that references the issue
+5. IMPORTANT: You MUST commit your changes using git. Run `git add` and `git commit` with a clear message that references #{issue_number}. Uncommitted changes will be lost!
 
 When done, provide a summary of what you implemented.
 """

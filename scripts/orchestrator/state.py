@@ -140,16 +140,20 @@ class State:
         logger.debug(f"Saved state to {self.state_file}")
 
     def is_processing(self, item_type: WorkItemType, number: int) -> bool:
-        """Check if an item is currently being processed or was recently completed."""
+        """Check if an item is currently being processed, completed, or failed."""
         key = self._make_key(item_type, number)
         item = self.work_items.get(key)
 
         if item is None:
             return False
 
-        # Consider it "processing" if in progress or completed
-        # This prevents re-processing completed items
-        return item.status in (WorkItemStatus.IN_PROGRESS, WorkItemStatus.COMPLETED)
+        # Consider it "processing" if in progress, completed, or failed
+        # This prevents re-processing items (failed items need manual clearing)
+        return item.status in (
+            WorkItemStatus.IN_PROGRESS,
+            WorkItemStatus.COMPLETED,
+            WorkItemStatus.FAILED,
+        )
 
     def is_in_progress(self, item_type: WorkItemType, number: int) -> bool:
         """Check if an item is currently in progress (not completed)."""
@@ -257,6 +261,33 @@ class State:
         """Get a work item by type and number."""
         key = self._make_key(item_type, number)
         return self.work_items.get(key)
+
+    def reset_in_progress_items(self) -> int:
+        """Reset all in-progress items so they can be resumed.
+
+        This should be called on daemon startup to allow resuming
+        work that was interrupted when the daemon was killed.
+
+        Returns:
+            Number of items reset.
+        """
+        keys_to_remove = []
+
+        for key, item in self.work_items.items():
+            if item.status == WorkItemStatus.IN_PROGRESS:
+                keys_to_remove.append(key)
+                logger.info(
+                    f"Resetting in-progress item {key} for resumption"
+                )
+
+        for key in keys_to_remove:
+            del self.work_items[key]
+
+        if keys_to_remove:
+            self._dirty = True
+            self._save()
+
+        return len(keys_to_remove)
 
     def cleanup_stale_items(self, max_age_hours: int = 24) -> int:
         """Remove items that have been in progress for too long.

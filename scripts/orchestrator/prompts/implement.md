@@ -21,14 +21,17 @@ You are implementing a GitHub issue. Follow these guidelines:
 
 5. **Write Tests**: If the project has tests, add tests for your changes.
 
-6. **Commit Properly**:
+6. **Commit Your Changes** (REQUIRED):
+   - You MUST run `git add` and `git commit` before finishing
    - Write clear, descriptive commit messages
    - Reference the issue number (e.g., "Implement feature X (#123)")
    - Keep commits focused and atomic
+   - WARNING: Any uncommitted changes will be lost when the worktree is cleaned up!
 
 ## Quality Checklist
 
 Before finishing:
+- [ ] Changes are committed with `git add` and `git commit`
 - [ ] Code compiles/runs without errors
 - [ ] Tests pass (if applicable)
 - [ ] No obvious security issues
