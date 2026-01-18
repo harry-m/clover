@@ -18,6 +18,7 @@ from .docker_utils import (
     get_claude_cli_path,
     inject_claude_into_container,
 )
+from .github_watcher import GitHubWatcher
 from .worktree_manager import WorktreeManager
 
 if TYPE_CHECKING:
@@ -38,6 +39,8 @@ class TestSession:
     status: str = "starting"  # starting, running, stopped
     started_at: datetime = field(default_factory=datetime.now)
     ports: dict[str, int] = field(default_factory=dict)
+    pr_number: Optional[int] = None
+    pr_title: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -50,6 +53,8 @@ class TestSession:
             "status": self.status,
             "started_at": self.started_at.isoformat(),
             "ports": self.ports,
+            "pr_number": self.pr_number,
+            "pr_title": self.pr_title,
         }
 
     @classmethod
@@ -64,6 +69,8 @@ class TestSession:
             status=data.get("status", "unknown"),
             started_at=datetime.fromisoformat(data.get("started_at", datetime.now().isoformat())),
             ports=data.get("ports", {}),
+            pr_number=data.get("pr_number"),
+            pr_title=data.get("pr_title"),
         )
 
 
@@ -78,6 +85,7 @@ class TestSessionManager:
         """
         self.config = config
         self.worktrees = WorktreeManager(config, repo_path=config.repo_path)
+        self.github = GitHubWatcher(config)
         self._sessions_file = config.state_file.parent / ".clover-test-sessions.json"
 
     def _load_sessions(self) -> dict[str, TestSession]:
@@ -113,19 +121,26 @@ class TestSessionManager:
         safe_name = re.sub(r"-+", "-", safe_name).strip("-").lower()
         return f"clover-test-{safe_name}"
 
-    async def _resolve_branch_name(self, branch_or_issue: str) -> str:
-        """Resolve a branch name from input.
+    async def _resolve_pr(self, pr_or_branch: str) -> tuple[str, Optional[int], Optional[str]]:
+        """Resolve PR info from input.
 
         Args:
-            branch_or_issue: Branch name or issue number.
+            pr_or_branch: PR number or branch name.
 
         Returns:
-            Branch name.
+            Tuple of (branch_name, pr_number, pr_title).
+            If input is a branch name, pr_number and pr_title are None.
         """
-        # If it looks like an issue number, convert to branch name
-        if branch_or_issue.isdigit():
-            return f"clover/issue-{branch_or_issue}"
-        return branch_or_issue
+        # If it looks like a PR number, look it up
+        if pr_or_branch.isdigit():
+            pr_number = int(pr_or_branch)
+            pr = await self.github.get_pr(pr_number)
+            if pr is None:
+                raise ValueError(f"PR #{pr_number} not found")
+            return (pr.branch, pr.number, pr.title)
+
+        # Otherwise treat as branch name
+        return (pr_or_branch, None, None)
 
     async def _get_default_branch(self) -> str:
         """Get the base branch name (configured or auto-detected)."""
@@ -185,11 +200,11 @@ class TestSessionManager:
         # Use first service
         return services[0]
 
-    async def start(self, branch_or_issue: str) -> TestSession:
+    async def start(self, pr_or_branch: str) -> TestSession:
         """Start a new test session.
 
         Args:
-            branch_or_issue: Branch name or issue number.
+            pr_or_branch: PR number or branch name.
 
         Returns:
             The created test session.
@@ -197,8 +212,9 @@ class TestSessionManager:
         Raises:
             DockerError: If Docker operations fail.
             FileNotFoundError: If compose file not found.
+            ValueError: If PR number not found.
         """
-        branch_name = await self._resolve_branch_name(branch_or_issue)
+        branch_name, pr_number, pr_title = await self._resolve_pr(pr_or_branch)
         session_id = self._generate_session_id(branch_name)
         default_branch = await self._get_default_branch()
 
@@ -214,7 +230,10 @@ class TestSessionManager:
         branch_exists = await self.worktrees.branch_exists(branch_name)
 
         # Create worktree
-        logger.info(f"Creating worktree for {branch_name}...")
+        if pr_number:
+            logger.info(f"Creating worktree for PR #{pr_number} ({branch_name})...")
+        else:
+            logger.info(f"Creating worktree for {branch_name}...")
         worktree = await self.worktrees.create_worktree(
             branch_name,
             base_branch=default_branch,
@@ -230,6 +249,8 @@ class TestSessionManager:
             branch_name=branch_name,
             worktree_path=worktree.path,
             compose_file=compose_file,
+            pr_number=pr_number,
+            pr_title=pr_title,
         )
 
         # Start Docker Compose

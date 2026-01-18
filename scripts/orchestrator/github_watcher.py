@@ -271,6 +271,24 @@ class GitHubWatcher:
             logger.error(f"Failed to get open PRs: {e}")
             return []
 
+    async def get_pr(self, pr_number: int) -> Optional[PullRequest]:
+        """Get a specific pull request by number.
+
+        Args:
+            pr_number: PR number.
+
+        Returns:
+            PullRequest if found, None otherwise.
+        """
+        path = f"/repos/{self.repo}/pulls/{pr_number}"
+
+        try:
+            data = await self._request("GET", path)
+            return PullRequest.from_api(data)
+        except GitHubError as e:
+            logger.error(f"Failed to get PR #{pr_number}: {e}")
+            return None
+
     async def get_pr_comments(self, pr_number: int) -> list[Comment]:
         """Get comments on a pull request.
 

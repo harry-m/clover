@@ -502,8 +502,13 @@ def cmd_test(args: argparse.Namespace) -> int:
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
 
     print(f"Test session started: {session.session_id}")
+    if session.pr_number:
+        print(f"  PR: #{session.pr_number} - {session.pr_title}")
     print(f"  Branch: {session.branch_name}")
     print(f"  Worktree: {session.worktree_path}")
     print(f"  Container: {session.container_name}")
@@ -571,6 +576,8 @@ def cmd_test_list(args: argparse.Namespace) -> int:
         status_icon = "●" if session.status == "running" else "○"
         print(f"\n{status_icon} {session.session_id}")
         print(f"  Status: {session.status}")
+        if session.pr_number:
+            print(f"  PR: #{session.pr_number} - {session.pr_title}")
         print(f"  Branch: {session.branch_name}")
         print(f"  Worktree: {session.worktree_path}")
         if session.container_name:
@@ -751,7 +758,7 @@ def main() -> int:
     test_start_parser = test_subparsers.add_parser("start", help="Start a test session")
     test_start_parser.add_argument(
         "target",
-        help="Issue number or branch name to test",
+        help="PR number or branch name to test",
     )
 
     # test attach [session_id]
@@ -796,7 +803,7 @@ def main() -> int:
     test_parser.add_argument(
         "target",
         nargs="?",
-        help="Issue number or branch name to test (shorthand for 'test start')",
+        help="PR number or branch name to test (shorthand for 'test start')",
     )
 
     args = parser.parse_args()
