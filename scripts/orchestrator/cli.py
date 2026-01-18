@@ -369,15 +369,78 @@ test:
     else:
         print(".gitignore already has Clover entries")
 
+    # Check if gh CLI is authenticated
+    gh_authenticated = False
+    gh_installed = False
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        gh_installed = True
+        gh_authenticated = result.returncode == 0
+    except FileNotFoundError:
+        gh_installed = False
+    except subprocess.TimeoutExpired:
+        gh_installed = True  # Assume installed if it timed out
+
     print()
+
+    # Handle gh authentication
+    if not gh_installed:
+        print("Warning: GitHub CLI (gh) is not installed.")
+        print("Install it from: https://cli.github.com/")
+        print()
+        print("Alternatively, set GITHUB_TOKEN in your environment and")
+        print("uncomment the token line in clover.yaml.")
+        print()
+    elif not gh_authenticated:
+        print("GitHub CLI is not authenticated.")
+        print()
+        response = ""
+        try:
+            response = input("Run 'gh auth login' now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+
+        if response in ("", "y", "yes"):
+            print()
+            # Run gh auth login interactively
+            subprocess.run(["gh", "auth", "login"])
+            print()
+            # Check if it worked
+            result = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                print("GitHub authentication successful!")
+                gh_authenticated = True
+            else:
+                print("GitHub authentication was not completed.")
+        print()
+
+    # Show next steps
     print("Next steps:")
+    step = 1
+
     if "TODO" in github_repo:
-        print("  1. Edit clover.yaml and set your GitHub repository")
-    print("  2. Ensure you're authenticated with GitHub:")
-    print("     gh auth login")
-    print("  3. Add the 'clover' label to issues you want Clover to work on")
-    print("  4. Start Clover:")
-    print("     clover run")
+        print(f"  {step}. Edit clover.yaml and set your GitHub repository")
+        step += 1
+
+    if not gh_authenticated:
+        print(f"  {step}. Authenticate with GitHub:")
+        print("       gh auth login")
+        step += 1
+
+    print(f"  {step}. Add the 'clover' label to issues you want Clover to work on")
+    step += 1
+
+    print(f"  {step}. Start Clover:")
+    print("       clover run")
 
     return 0
 
