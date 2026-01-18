@@ -68,6 +68,10 @@ class Config:
     # Test session settings
     test: TestConfig = field(default_factory=TestConfig)
 
+    # Optional setup script to run after worktree creation
+    # Path relative to repo root, receives CLOVER_* env vars
+    setup_script: Optional[str] = None
+
     @property
     def repo_owner(self) -> str:
         """Extract owner from github_repo."""
@@ -151,6 +155,9 @@ class Config:
             container=test_config.get("container"),
         )
 
+        # Setup script (optional)
+        setup_script = daemon.get("setup_script")
+
         return cls(
             github_token=github_token,
             github_repo=github_repo,
@@ -164,6 +171,7 @@ class Config:
             max_turns=max_turns,
             review_commands=review_commands,
             test=test,
+            setup_script=setup_script,
         )
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from pathlib import Path
 from typing import Optional
@@ -56,6 +57,63 @@ class Orchestrator:
         if self.display:
             self.display.log(message)
             self.display.refresh()
+
+    async def _run_setup_script(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        work_type: str,
+        number: int,
+    ) -> None:
+        """Run setup script if configured.
+
+        Args:
+            worktree_path: Path to the worktree directory.
+            branch_name: Name of the branch.
+            work_type: Either "issue" or "pr_review".
+            number: Issue or PR number.
+
+        Raises:
+            FileNotFoundError: If setup script doesn't exist.
+            RuntimeError: If setup script fails.
+        """
+        if not self.config.setup_script:
+            return
+
+        script_path = self.config.repo_path / self.config.setup_script
+        if not script_path.exists():
+            raise FileNotFoundError(f"Setup script not found: {script_path}")
+
+        env = {
+            **os.environ,
+            "CLOVER_PARENT_REPO": str(self.config.repo_path),
+            "CLOVER_WORKTREE": str(worktree_path),
+            "CLOVER_BRANCH": branch_name,
+            "CLOVER_BASE_BRANCH": self._default_branch,
+            "CLOVER_WORK_TYPE": work_type,
+        }
+        if work_type == "issue":
+            env["CLOVER_ISSUE_NUMBER"] = str(number)
+        else:
+            env["CLOVER_PR_NUMBER"] = str(number)
+
+        logger.info(f"Running setup script: {script_path}")
+
+        process = await asyncio.create_subprocess_exec(
+            str(script_path),
+            cwd=worktree_path,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await process.communicate()
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Setup script failed (exit {process.returncode}): {stdout.decode()}"
+            )
+
+        logger.info("Setup script completed successfully")
 
     async def start(self) -> None:
         """Start the orchestrator daemon."""
@@ -209,6 +267,11 @@ class Orchestrator:
                 issue.number,
                 worktree_path=str(worktree.path),
                 branch_name=branch_name,
+            )
+
+            # Run setup script if configured
+            await self._run_setup_script(
+                worktree.path, branch_name, "issue", issue.number
             )
 
             # Post start/resume comment
@@ -379,6 +442,11 @@ class Orchestrator:
 
             # Create worktree at PR branch
             worktree = await self.worktrees.checkout_pr_branch(pr.number, pr.branch)
+
+            # Run setup script if configured
+            await self._run_setup_script(
+                worktree.path, pr.branch, "pr_review", pr.number
+            )
 
             # Run review checks if configured
             checks_output = ""
