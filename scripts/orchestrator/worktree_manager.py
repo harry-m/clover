@@ -101,6 +101,7 @@ class WorktreeManager:
         branch_name: str,
         base_branch: str = "main",
         checkout_existing: bool = False,
+        force: bool = False,
     ) -> Worktree:
         """Create a new worktree for a branch.
 
@@ -108,17 +109,19 @@ class WorktreeManager:
             branch_name: Name of the branch to create.
             base_branch: Branch to base the new branch on.
             checkout_existing: If True, checkout existing branch instead of creating new.
+            force: If True, remove existing worktree even if it has uncommitted changes.
 
         Returns:
             Worktree instance.
 
         Raises:
-            WorktreeError: If worktree creation fails.
+            WorktreeError: If worktree creation fails or if existing worktree has
+                uncommitted changes (unless force=True).
         """
         # Serialize worktree operations to avoid git config lock contention
         async with self._worktree_lock:
             return await self._create_worktree_impl(
-                branch_name, base_branch, checkout_existing
+                branch_name, base_branch, checkout_existing, force
             )
 
     async def _create_worktree_impl(
@@ -126,6 +129,7 @@ class WorktreeManager:
         branch_name: str,
         base_branch: str,
         checkout_existing: bool,
+        force: bool = False,
     ) -> Worktree:
         """Internal implementation of create_worktree (called with lock held)."""
         # Ensure base directory exists
@@ -140,6 +144,13 @@ class WorktreeManager:
 
         # Check if worktree already exists
         if worktree_path.exists():
+            # Check for uncommitted changes before removing
+            if not force and await self.has_uncommitted_changes(worktree_path):
+                status = await self.get_uncommitted_status(worktree_path)
+                raise WorktreeError(
+                    f"Worktree at {worktree_path} has uncommitted changes:\n{status}\n"
+                    f"Use --force to discard these changes, or commit/stash them first."
+                )
             logger.warning(f"Worktree already exists at {worktree_path}, removing")
             await self.cleanup_worktree(worktree_path)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -168,6 +169,60 @@ class TestSessionManager:
             )
         return compose_path
 
+    async def _run_setup_script(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        pr_number: Optional[int] = None,
+    ) -> None:
+        """Run setup script if configured.
+
+        Args:
+            worktree_path: Path to the worktree directory.
+            branch_name: Name of the branch.
+            pr_number: PR number if starting from a PR.
+
+        Raises:
+            FileNotFoundError: If setup script doesn't exist.
+            RuntimeError: If setup script fails.
+        """
+        if not self.config.setup_script:
+            return
+
+        script_path = self.config.repo_path / self.config.setup_script
+        if not script_path.exists():
+            raise FileNotFoundError(f"Setup script not found: {script_path}")
+
+        default_branch = await self._get_default_branch()
+
+        env = {
+            **os.environ,
+            "CLOVER_PARENT_REPO": str(self.config.repo_path),
+            "CLOVER_WORKTREE": str(worktree_path),
+            "CLOVER_BRANCH": branch_name,
+            "CLOVER_BASE_BRANCH": default_branch,
+            "CLOVER_WORK_TYPE": "test_session",
+        }
+        if pr_number:
+            env["CLOVER_PR_NUMBER"] = str(pr_number)
+
+        logger.info(f"Running setup script: {script_path}")
+
+        # Run through sh for cross-platform compatibility (works with Git Bash on Windows)
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            str(script_path),
+            cwd=worktree_path,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await process.communicate()
+
+        if process.returncode != 0:
+            output = stdout.decode() if stdout else ""
+            raise RuntimeError(f"Setup script failed (exit {process.returncode}):\n{output}")
+
     async def _get_target_service(self, compose: DockerCompose) -> str:
         """Get the target service for Claude sessions.
 
@@ -200,11 +255,12 @@ class TestSessionManager:
         # Use first service
         return services[0]
 
-    async def start(self, pr_or_branch: str) -> TestSession:
+    async def start(self, pr_or_branch: str, force: bool = False) -> TestSession:
         """Start a new test session.
 
         Args:
             pr_or_branch: PR number or branch name.
+            force: If True, remove existing worktree even if it has uncommitted changes.
 
         Returns:
             The created test session.
@@ -213,6 +269,7 @@ class TestSessionManager:
             DockerError: If Docker operations fail.
             FileNotFoundError: If compose file not found.
             ValueError: If PR number not found.
+            WorktreeError: If existing worktree has uncommitted changes (unless force=True).
         """
         branch_name, pr_number, pr_title = await self._resolve_pr(pr_or_branch)
         session_id = self._generate_session_id(branch_name)
@@ -238,7 +295,16 @@ class TestSessionManager:
             branch_name,
             base_branch=default_branch,
             checkout_existing=branch_exists,
+            force=force,
         )
+
+        # Run setup script if configured (e.g., to copy .env files)
+        try:
+            await self._run_setup_script(worktree.path, branch_name, pr_number)
+        except (FileNotFoundError, RuntimeError) as e:
+            # Cleanup worktree on setup failure
+            await self.worktrees.cleanup_worktree(worktree.path)
+            raise DockerError(f"Setup script failed:\n{e}")
 
         # Find compose file
         compose_file = await self._find_compose_file(worktree.path)
@@ -300,19 +366,21 @@ class TestSessionManager:
         logger.info(f"Test session {session_id} started")
         return session
 
-    async def stop(self, session_id: str, cleanup_worktree: bool = True) -> None:
+    async def stop(self, identifier: str, cleanup_worktree: bool = True) -> str:
         """Stop a test session.
 
         Args:
-            session_id: Session ID to stop.
+            identifier: Session ID, PR number, or branch name.
             cleanup_worktree: Whether to remove the worktree.
+
+        Returns:
+            The resolved session_id that was stopped.
 
         Raises:
             ValueError: If session not found.
         """
+        session_id = self._resolve_session_identifier(identifier)
         sessions = self._load_sessions()
-        if session_id not in sessions:
-            raise ValueError(f"Session not found: {session_id}")
 
         session = sessions[session_id]
 
@@ -332,6 +400,7 @@ class TestSessionManager:
         self._save_sessions(sessions)
 
         logger.info(f"Test session {session_id} stopped")
+        return session_id
 
     async def list_sessions(self) -> list[TestSession]:
         """List all test sessions.
@@ -353,25 +422,74 @@ class TestSessionManager:
         self._save_sessions(sessions)
         return list(sessions.values())
 
-    async def get_session(self, session_id: str) -> Optional[TestSession]:
+    def _resolve_session_identifier(self, identifier: str) -> str:
+        """Resolve a user-friendly identifier to a session_id.
+
+        Accepts:
+        - Full session_id (e.g., "clover-test-feature-foo")
+        - PR number (e.g., "123")
+        - Branch name (e.g., "feature/foo")
+
+        Args:
+            identifier: Session identifier in any of the above formats.
+
+        Returns:
+            The resolved session_id.
+
+        Raises:
+            ValueError: If no matching session is found.
+        """
+        sessions = self._load_sessions()
+
+        # 1. Exact session_id match
+        if identifier in sessions:
+            return identifier
+
+        # 2. PR number match
+        if identifier.isdigit():
+            pr_number = int(identifier)
+            for session_id, session in sessions.items():
+                if session.pr_number == pr_number:
+                    return session_id
+
+        # 3. Branch name match
+        for session_id, session in sessions.items():
+            if session.branch_name == identifier:
+                return session_id
+
+        # 4. Try generating session_id from identifier (in case it's a branch name)
+        generated_id = self._generate_session_id(identifier)
+        if generated_id in sessions:
+            return generated_id
+
+        raise ValueError(
+            f"No session found matching '{identifier}'. "
+            f"Use 'clover test list' to see available sessions."
+        )
+
+    async def get_session(self, identifier: str) -> Optional[TestSession]:
         """Get a specific session.
 
         Args:
-            session_id: Session ID.
+            identifier: Session ID, PR number, or branch name.
 
         Returns:
             Session if found, None otherwise.
         """
         sessions = self._load_sessions()
-        return sessions.get(session_id)
+        try:
+            session_id = self._resolve_session_identifier(identifier)
+            return sessions.get(session_id)
+        except ValueError:
+            return None
 
-    async def attach(self, session_id: Optional[str] = None) -> None:
+    async def attach(self, identifier: Optional[str] = None) -> None:
         """Attach to a test session for interactive Claude.
 
         This will exec into the container with an interactive shell.
 
         Args:
-            session_id: Session ID to attach to. If None, uses most recent running session.
+            identifier: Session ID, PR number, or branch name. If None, uses most recent running session.
 
         Raises:
             ValueError: If session not found or not running.
@@ -380,15 +498,14 @@ class TestSessionManager:
 
         sessions = self._load_sessions()
 
-        if session_id is None:
+        if identifier is None:
             # Find most recent running session
             running = [s for s in sessions.values() if s.status == "running"]
             if not running:
                 raise ValueError("No running test sessions found")
             session = max(running, key=lambda s: s.started_at)
         else:
-            if session_id not in sessions:
-                raise ValueError(f"Session not found: {session_id}")
+            session_id = self._resolve_session_identifier(identifier)
             session = sessions[session_id]
 
         if session.status != "running":
@@ -416,14 +533,14 @@ class TestSessionManager:
 
     async def get_logs(
         self,
-        session_id: str,
+        identifier: str,
         follow: bool = True,
         tail: int = 100,
     ) -> asyncio.subprocess.Process:
         """Get logs from a test session.
 
         Args:
-            session_id: Session ID.
+            identifier: Session ID, PR number, or branch name.
             follow: Follow log output.
             tail: Number of lines to show from end.
 
@@ -433,10 +550,134 @@ class TestSessionManager:
         Raises:
             ValueError: If session not found.
         """
+        session_id = self._resolve_session_identifier(identifier)
         sessions = self._load_sessions()
-        if session_id not in sessions:
-            raise ValueError(f"Session not found: {session_id}")
-
         session = sessions[session_id]
-        compose = DockerCompose(session.compose_file, session_id)
+        compose = DockerCompose(session.compose_file, session.session_id)
         return await compose.logs(follow=follow, tail=tail)
+
+    async def cleanup_worktree(self, identifier: str, force: bool = False) -> bool:
+        """Safely clean up a test session's worktree.
+
+        Performs safety checks before deleting:
+        - Checks for uncommitted changes
+        - Checks if branch has been pushed to remote
+        - Prompts user for confirmation if issues found
+
+        Args:
+            identifier: Session ID, PR number, or branch name.
+            force: Skip safety checks and delete anyway.
+
+        Returns:
+            True if worktree was cleaned up, False if user declined.
+
+        Raises:
+            ValueError: If session not found or still running.
+        """
+        session_id = self._resolve_session_identifier(identifier)
+        sessions = self._load_sessions()
+        session = sessions[session_id]
+
+        if session.status == "running":
+            raise ValueError(
+                f"Session is still running. Stop it first with: clover test stop {identifier}"
+            )
+
+        worktree_path = session.worktree_path
+        if not worktree_path.exists():
+            # Already cleaned up, just remove from sessions
+            del sessions[session_id]
+            self._save_sessions(sessions)
+            logger.info(f"Session {session_id} removed (worktree already gone)")
+            return True
+
+        issues = []
+
+        if not force:
+            # Check for uncommitted changes
+            has_changes = await self._check_uncommitted_changes(worktree_path)
+            if has_changes:
+                issues.append("Has uncommitted changes")
+
+            # Check if branch is pushed to remote
+            is_pushed = await self._check_branch_pushed(worktree_path, session.branch_name)
+            if not is_pushed:
+                issues.append("Branch not pushed to remote")
+
+        if issues and not force:
+            print(f"Warning: Worktree at {worktree_path} has issues:")
+            for issue in issues:
+                print(f"  - {issue}")
+            print()
+            try:
+                response = input("Delete anyway? (yes/no): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
+                return False
+
+            if response not in ("yes", "y"):
+                print("Aborted. Worktree preserved.")
+                return False
+
+        # Clean up the worktree
+        await self.worktrees.cleanup_worktree(worktree_path)
+
+        # Remove session from state
+        del sessions[session_id]
+        self._save_sessions(sessions)
+
+        logger.info(f"Cleaned up worktree for session {session_id}")
+        return True
+
+    async def _check_uncommitted_changes(self, worktree_path: Path) -> bool:
+        """Check if worktree has uncommitted changes.
+
+        Args:
+            worktree_path: Path to the worktree.
+
+        Returns:
+            True if there are uncommitted changes.
+        """
+        process = await asyncio.create_subprocess_exec(
+            "git", "status", "--porcelain",
+            cwd=worktree_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        return bool(stdout.strip())
+
+    async def _check_branch_pushed(self, worktree_path: Path, branch_name: str) -> bool:
+        """Check if the branch has been pushed to remote.
+
+        Args:
+            worktree_path: Path to the worktree.
+            branch_name: Name of the branch.
+
+        Returns:
+            True if branch exists on remote and is up to date.
+        """
+        # Check if remote tracking branch exists
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--verify", f"origin/{branch_name}",
+            cwd=worktree_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await process.communicate()
+        if process.returncode != 0:
+            return False  # No remote tracking branch
+
+        # Check if local is ahead of remote
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-list", "--count", f"origin/{branch_name}..HEAD",
+            cwd=worktree_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            return False
+
+        ahead_count = int(stdout.strip() or 0)
+        return ahead_count == 0  # True if not ahead (i.e., pushed)

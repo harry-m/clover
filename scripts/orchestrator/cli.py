@@ -28,6 +28,7 @@ from .docker_utils import DockerError
 from .main import async_main
 from .state import State, WorkItemStatus, WorkItemType
 from .test_session import TestSessionManager
+from .worktree_manager import WorktreeError
 
 
 def get_repo_path(args: argparse.Namespace) -> Optional[Path]:
@@ -493,9 +494,13 @@ def cmd_test(args: argparse.Namespace) -> int:
         return 1
 
     manager = TestSessionManager(config)
+    force = getattr(args, "force", False)
 
     try:
-        session = _run_async(manager.start(args.target))
+        session = _run_async(manager.start(args.target, force=force))
+    except WorktreeError as e:
+        print(f"Worktree error: {e}")
+        return 1
     except DockerError as e:
         print(f"Docker error: {e}")
         return 1
@@ -521,14 +526,17 @@ def cmd_test(args: argparse.Namespace) -> int:
             print(f"  {service} port {container_port} -> http://localhost:{host_port}")
         print()
 
+    # Use PR number for suggestions if available, otherwise branch name
+    ref = str(session.pr_number) if session.pr_number else session.branch_name
+
     print("To attach to this session:")
-    print(f"  clover test attach {session.session_id}")
+    print(f"  clover test attach {ref}")
     print()
     print("To see logs:")
-    print(f"  clover test logs {session.session_id}")
+    print(f"  clover test logs {ref}")
     print()
     print("To stop:")
-    print(f"  clover test stop {session.session_id}")
+    print(f"  clover test stop {ref}")
 
     return 0
 
@@ -574,10 +582,14 @@ def cmd_test_list(args: argparse.Namespace) -> int:
 
     for session in sessions:
         status_icon = "●" if session.status == "running" else "○"
-        print(f"\n{status_icon} {session.session_id}")
-        print(f"  Status: {session.status}")
+        # Show the most user-friendly identifier prominently
         if session.pr_number:
-            print(f"  PR: #{session.pr_number} - {session.pr_title}")
+            print(f"\n{status_icon} PR #{session.pr_number}: {session.pr_title}")
+            print(f"  Use: clover test stop {session.pr_number}")
+        else:
+            print(f"\n{status_icon} {session.branch_name}")
+            print(f"  Use: clover test stop {session.branch_name}")
+        print(f"  Status: {session.status}")
         print(f"  Branch: {session.branch_name}")
         print(f"  Worktree: {session.worktree_path}")
         if session.container_name:
@@ -622,8 +634,56 @@ def cmd_test_stop(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        _run_async(manager.stop(session_id))
-        print(f"Stopped session: {session_id}")
+        resolved_id = _run_async(manager.stop(session_id, cleanup_worktree=False))
+        session = _run_async(manager.get_session(resolved_id))
+        print(f"Stopped session: {resolved_id}")
+        print()
+        print(f"Worktree preserved at: {session.worktree_path}")
+        print("To clean up the worktree (after pushing/committing changes):")
+        print(f"  clover test cleanup {session.pr_number or session.branch_name}")
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_test_cleanup(args: argparse.Namespace) -> int:
+    """Clean up a test session's worktree safely."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    identifier = args.session_id
+
+    # If no identifier, show list and prompt
+    if not identifier:
+        sessions = _run_async(manager.list_sessions())
+        stopped = [s for s in sessions if s.status == "stopped"]
+
+        if not stopped:
+            print("No stopped test sessions found.")
+            print("Use 'clover test stop' first to stop a running session.")
+            return 0
+
+        if len(stopped) == 1:
+            identifier = str(stopped[0].pr_number) if stopped[0].pr_number else stopped[0].branch_name
+            print(f"Cleaning up session: {identifier}")
+        else:
+            print("Multiple stopped sessions. Please specify which to clean up:")
+            for s in stopped:
+                ref = str(s.pr_number) if s.pr_number else s.branch_name
+                print(f"  - {ref} ({s.branch_name})")
+            return 1
+
+    try:
+        result = _run_async(manager.cleanup_worktree(identifier, force=args.force))
+        if result:
+            print(f"Cleaned up worktree for: {identifier}")
+        # If result is False, the user declined - message already printed
     except ValueError as e:
         print(f"Error: {e}")
         return 1
@@ -760,13 +820,18 @@ def main() -> int:
         "target",
         help="PR number or branch name to test",
     )
+    test_start_parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Force removal of existing worktree even if it has uncommitted changes",
+    )
 
     # test attach [session_id]
     test_attach_parser = test_subparsers.add_parser("attach", help="Attach to a test session")
     test_attach_parser.add_argument(
         "session_id",
         nargs="?",
-        help="Session ID to attach to (default: most recent)",
+        help="Session ID, PR number, or branch name (default: most recent)",
     )
 
     # test list
@@ -777,7 +842,7 @@ def main() -> int:
     test_stop_parser.add_argument(
         "session_id",
         nargs="?",
-        help="Session ID to stop",
+        help="Session ID, PR number, or branch name",
     )
 
     # test logs [session_id]
@@ -785,7 +850,23 @@ def main() -> int:
     test_logs_parser.add_argument(
         "session_id",
         nargs="?",
-        help="Session ID to get logs from (default: most recent)",
+        help="Session ID, PR number, or branch name (default: most recent)",
+    )
+
+    # test cleanup [session_id]
+    test_cleanup_parser = test_subparsers.add_parser(
+        "cleanup",
+        help="Clean up a stopped session's worktree (with safety checks)",
+    )
+    test_cleanup_parser.add_argument(
+        "session_id",
+        nargs="?",
+        help="Session ID, PR number, or branch name",
+    )
+    test_cleanup_parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Skip safety checks (uncommitted changes, unpushed commits)",
     )
     test_logs_parser.add_argument(
         "-f", "--follow",
@@ -801,10 +882,19 @@ def main() -> int:
 
     # Also allow `clover test <target>` as shorthand for `clover test start <target>`
     test_parser.add_argument(
-        "target",
+        "shorthand_target",
         nargs="?",
         help="PR number or branch name to test (shorthand for 'test start')",
     )
+
+    # Handle `clover test <target>` shorthand by inserting "start"
+    # argparse subparsers require the subcommand first, so we rewrite:
+    # `clover test 179` -> `clover test start 179`
+    test_subcommands = {"start", "attach", "list", "stop", "logs", "cleanup"}
+    if (len(sys.argv) >= 3 and sys.argv[1] == "test"
+        and sys.argv[2] not in test_subcommands
+        and not sys.argv[2].startswith("-")):
+        sys.argv.insert(2, "start")
 
     args = parser.parse_args()
 
@@ -838,8 +928,11 @@ def main() -> int:
             return cmd_test_stop(args)
         elif args.test_command == "logs":
             return cmd_test_logs(args)
-        elif args.target:
+        elif args.test_command == "cleanup":
+            return cmd_test_cleanup(args)
+        elif args.shorthand_target:
             # Shorthand: `clover test <target>` -> `clover test start <target>`
+            args.target = args.shorthand_target
             return cmd_test(args)
         else:
             test_parser.print_help()

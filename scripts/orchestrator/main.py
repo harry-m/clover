@@ -99,7 +99,9 @@ class Orchestrator:
 
         logger.info(f"Running setup script: {script_path}")
 
+        # Run through sh for cross-platform compatibility (works with Git Bash on Windows)
         process = await asyncio.create_subprocess_exec(
+            "sh",
             str(script_path),
             cwd=worktree_path,
             env=env,
