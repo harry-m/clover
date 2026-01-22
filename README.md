@@ -136,7 +136,7 @@ PRE_MERGE_COMMANDS=["pytest", "ruff check .", "bandit -r src/"]
 # Show available commands
 clover --help
 
-# Start the daemon
+# Start the daemon (automated background processing)
 clover run
 
 # Start with verbose logging
@@ -159,6 +159,13 @@ clover clear review 7
 
 # Clear state for a merge
 clover clear merge 7
+
+# Manual testing commands (see "Manual Testing" section below)
+clover test start <PR>   # Start testing a PR
+clover test status       # Show current test session
+clover test resume       # Re-launch Claude
+clover test logs         # View Docker logs
+clover test stop         # Stop testing
 ```
 
 ### Workflow: Implementing Issues
@@ -201,6 +208,104 @@ clover clear merge 7
    - Close any linked issues
 
 3. **If checks fail**, Clover posts a comment explaining what failed
+
+### Workflow: Manual Testing with `clover test`
+
+While `clover run` handles automated work in the background, `clover test` is for **you** to manually test PRs with Claude's help.
+
+#### Mental Model
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  clover run (automated)          clover test (manual)           │
+│  ─────────────────────           ────────────────────           │
+│  • Runs in background            • Interactive, one at a time   │
+│  • Multiple parallel worktrees   • Direct checkout in main repo │
+│  • Claude works autonomously     • Claude assists YOU           │
+│  • Implements & reviews PRs      • Helps test & verify PRs      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Commands
+
+```bash
+# Start testing a PR - checks out the branch, starts Docker, launches Claude
+clover test start <PR_NUMBER>
+
+# Show what you're currently testing
+clover test status
+
+# Re-launch Claude if you exit (session persists)
+clover test resume
+
+# View Docker container logs
+clover test logs
+clover test logs -f  # follow mode
+
+# Stop testing - shuts down Docker, returns to your original branch
+clover test stop
+```
+
+#### Example Session
+
+```bash
+$ clover test start 184
+Testing PR #184: Add user authentication
+Checking out feature/auth...
+Starting Docker containers in background...
+Launching Claude for PR #184...
+
+# Claude launches with full context:
+# - PR title and description
+# - Linked issue details
+# - Your role: help test and verify the changes
+
+# ... work with Claude to test the PR ...
+# ... exit Claude when done ...
+
+$ clover test stop
+Stopping Docker containers...
+Switching back to main...
+Stopped testing PR #184
+```
+
+#### Options
+
+```bash
+# Start without launching Claude (just setup)
+clover test start 184 --no-claude
+
+# Start without Docker (if you don't need containers)
+clover test start 184 --no-docker
+
+# Stop but stay on the PR branch
+clover test stop --keep-branch
+```
+
+#### Docker Setup
+
+Your `docker-compose.yml` only needs your app services. Example:
+
+```yaml
+services:
+  postgres:
+    image: postgres:15
+    # ...
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    # ...
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    # ...
+```
+
+Docker containers start in the background so you're not waiting - Claude launches immediately while services spin up.
 
 ## Pre-merge Checks
 
