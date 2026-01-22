@@ -46,6 +46,9 @@ class WorkItem:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     error_message: Optional[str] = None
+    # For issues: the PR number that was created
+    # For PR reviews: the issue number this PR addresses
+    related_number: Optional[int] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -58,6 +61,7 @@ class WorkItem:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "error_message": self.error_message,
+            "related_number": self.related_number,
         }
 
     @classmethod
@@ -72,6 +76,7 @@ class WorkItem:
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
             error_message=data.get("error_message"),
+            related_number=data.get("related_number"),
         )
 
 
@@ -191,8 +196,19 @@ class State:
         logger.info(f"Marked {item_type.value} #{number} as in progress")
         return item
 
-    def mark_completed(self, item_type: WorkItemType, number: int) -> None:
-        """Mark an item as completed."""
+    def mark_completed(
+        self,
+        item_type: WorkItemType,
+        number: int,
+        related_number: Optional[int] = None,
+    ) -> None:
+        """Mark an item as completed.
+
+        Args:
+            item_type: Type of work item.
+            number: Issue or PR number.
+            related_number: For issues, the PR number created. For PR reviews, the issue number.
+        """
         key = self._make_key(item_type, number)
         item = self.work_items.get(key)
 
@@ -202,6 +218,8 @@ class State:
 
         item.status = WorkItemStatus.COMPLETED
         item.completed_at = datetime.utcnow().isoformat()
+        if related_number is not None:
+            item.related_number = related_number
         self._dirty = True
         self._save()
 

@@ -148,14 +148,67 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if completed:
         print(f"Completed ({len(completed)}):")
+        # Build a map of PR numbers that came from issues
+        pr_from_issue = {}  # pr_number -> issue_number
+        for item in completed:
+            if item.item_type == WorkItemType.ISSUE and item.related_number:
+                pr_from_issue[item.related_number] = item.number
+
+        # Show items, grouping related ones
+        shown_prs = set()
         for item in completed[-10:]:  # Show last 10
-            print(f"  - {item.item_type.value} #{item.number}")
+            if item.item_type == WorkItemType.ISSUE:
+                if item.related_number:
+                    # Issue that created a PR
+                    print(f"  - issue #{item.number} → PR #{item.related_number}")
+                    shown_prs.add(item.related_number)
+                else:
+                    # Issue with no PR (no changes needed)
+                    print(f"  - issue #{item.number} (no changes)")
+            elif item.item_type == WorkItemType.PR_REVIEW:
+                if item.number in pr_from_issue:
+                    # This PR came from an issue we know about
+                    if item.number not in shown_prs:
+                        issue_num = pr_from_issue[item.number]
+                        print(f"  - issue #{issue_num} → PR #{item.number} (reviewed)")
+                        shown_prs.add(item.number)
+                else:
+                    # Standalone PR review
+                    print(f"  - pr_review #{item.number}")
+            else:
+                print(f"  - {item.item_type.value} #{item.number}")
         if len(completed) > 10:
             print(f"  ... and {len(completed) - 10} more")
         print()
 
     if not (in_progress or completed or failed):
         print("No work items tracked yet.")
+
+    # Show test sessions
+    manager = TestSessionManager(config)
+    sessions = _run_async(manager.list_sessions())
+
+    if sessions:
+        print()
+        print("Test Sessions")
+        print("-" * 50)
+        for session in sessions:
+            status_icon = "●" if session.status == "running" else "○"
+            if session.pr_number:
+                print(f"{status_icon} PR #{session.pr_number}: {session.pr_title}")
+            else:
+                print(f"{status_icon} {session.branch_name}")
+            print(f"  Status: {session.status}")
+            print(f"  Worktree: {session.worktree_path}")
+            if session.ports:
+                for port_key, host_port in session.ports.items():
+                    service, container_port = port_key.split(":")
+                    print(f"  Port: {service}:{container_port} -> localhost:{host_port}")
+            ref = str(session.pr_number) if session.pr_number else session.branch_name
+            if session.status == "running":
+                print(f"  Stop: clover test stop {ref}")
+            else:
+                print(f"  Cleanup: clover test cleanup {ref}")
 
     return 0
 
@@ -562,48 +615,6 @@ def cmd_test_attach(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_test_list(args: argparse.Namespace) -> int:
-    """List test sessions."""
-    try:
-        config = load_config(get_repo_path(args))
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        return 1
-
-    manager = TestSessionManager(config)
-    sessions = _run_async(manager.list_sessions())
-
-    if not sessions:
-        print("No test sessions found.")
-        return 0
-
-    print("Test Sessions")
-    print("=" * 60)
-
-    for session in sessions:
-        status_icon = "●" if session.status == "running" else "○"
-        # Show the most user-friendly identifier prominently
-        if session.pr_number:
-            print(f"\n{status_icon} PR #{session.pr_number}: {session.pr_title}")
-            print(f"  Use: clover test stop {session.pr_number}")
-        else:
-            print(f"\n{status_icon} {session.branch_name}")
-            print(f"  Use: clover test stop {session.branch_name}")
-        print(f"  Status: {session.status}")
-        print(f"  Branch: {session.branch_name}")
-        print(f"  Worktree: {session.worktree_path}")
-        if session.container_name:
-            print(f"  Container: {session.container_name}")
-        if session.ports:
-            print("  Ports:")
-            for port_key, host_port in session.ports.items():
-                service, container_port = port_key.split(":")
-                print(f"    {service}:{container_port} -> localhost:{host_port}")
-        print(f"  Started: {session.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    return 0
-
-
 def cmd_test_stop(args: argparse.Namespace) -> int:
     """Stop a test session."""
     try:
@@ -834,9 +845,6 @@ def main() -> int:
         help="Session ID, PR number, or branch name (default: most recent)",
     )
 
-    # test list
-    test_subparsers.add_parser("list", help="List test sessions")
-
     # test stop [session_id]
     test_stop_parser = test_subparsers.add_parser("stop", help="Stop a test session")
     test_stop_parser.add_argument(
@@ -880,22 +888,6 @@ def main() -> int:
         help="Number of lines to show (default: 100)",
     )
 
-    # Also allow `clover test <target>` as shorthand for `clover test start <target>`
-    test_parser.add_argument(
-        "shorthand_target",
-        nargs="?",
-        help="PR number or branch name to test (shorthand for 'test start')",
-    )
-
-    # Handle `clover test <target>` shorthand by inserting "start"
-    # argparse subparsers require the subcommand first, so we rewrite:
-    # `clover test 179` -> `clover test start 179`
-    test_subcommands = {"start", "attach", "list", "stop", "logs", "cleanup"}
-    if (len(sys.argv) >= 3 and sys.argv[1] == "test"
-        and sys.argv[2] not in test_subcommands
-        and not sys.argv[2].startswith("-")):
-        sys.argv.insert(2, "start")
-
     args = parser.parse_args()
 
     # Configure logging
@@ -922,18 +914,12 @@ def main() -> int:
             return cmd_test(args)
         elif args.test_command == "attach":
             return cmd_test_attach(args)
-        elif args.test_command == "list":
-            return cmd_test_list(args)
         elif args.test_command == "stop":
             return cmd_test_stop(args)
         elif args.test_command == "logs":
             return cmd_test_logs(args)
         elif args.test_command == "cleanup":
             return cmd_test_cleanup(args)
-        elif args.shorthand_target:
-            # Shorthand: `clover test <target>` -> `clover test start <target>`
-            args.target = args.shorthand_target
-            return cmd_test(args)
         else:
             test_parser.print_help()
             return 0

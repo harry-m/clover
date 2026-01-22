@@ -131,6 +131,9 @@ class TestSessionManager:
         Returns:
             Tuple of (branch_name, pr_number, pr_title).
             If input is a branch name, pr_number and pr_title are None.
+
+        Raises:
+            ValueError: If PR not found or branch doesn't exist.
         """
         # If it looks like a PR number, look it up
         if pr_or_branch.isdigit():
@@ -140,7 +143,13 @@ class TestSessionManager:
                 raise ValueError(f"PR #{pr_number} not found")
             return (pr.branch, pr.number, pr.title)
 
-        # Otherwise treat as branch name
+        # Otherwise treat as branch name - verify it exists
+        branch_exists = await self.worktrees.branch_exists(pr_or_branch)
+        if not branch_exists:
+            raise ValueError(
+                f"Branch '{pr_or_branch}' not found. "
+                f"Use a PR number or an existing branch name."
+            )
         return (pr_or_branch, None, None)
 
     async def _get_default_branch(self) -> str:
@@ -283,10 +292,7 @@ class TestSessionManager:
                 logger.info(f"Session {session_id} already running")
                 return existing
 
-        # Check if branch exists
-        branch_exists = await self.worktrees.branch_exists(branch_name)
-
-        # Create worktree
+        # Create worktree (branch already validated to exist in _resolve_pr)
         if pr_number:
             logger.info(f"Creating worktree for PR #{pr_number} ({branch_name})...")
         else:
@@ -294,7 +300,7 @@ class TestSessionManager:
         worktree = await self.worktrees.create_worktree(
             branch_name,
             base_branch=default_branch,
-            checkout_existing=branch_exists,
+            checkout_existing=True,  # Branch must exist
             force=force,
         )
 

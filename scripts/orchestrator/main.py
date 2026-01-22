@@ -377,8 +377,8 @@ class Orchestrator:
                 f"*— Clover, the Claude Overseer*",
             )
 
-            # Mark completed
-            self.state.mark_completed(WorkItemType.ISSUE, issue.number)
+            # Mark completed with link to the created PR
+            self.state.mark_completed(WorkItemType.ISSUE, issue.number, related_number=pr.number)
             self._log(f"Created PR #{pr.number} for issue #{issue.number}")
             if agent:
                 agent.mark_completed()
