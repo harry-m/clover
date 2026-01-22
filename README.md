@@ -1,6 +1,4 @@
-# Clover 🍀
-
-*Claude's Little Observer, Validator, and Executor of Requests*
+# Clover, the Claude Overseer
 
 A local Python daemon that watches GitHub issues and pull requests, automatically launching Claude Code to implement features and review code.
 
