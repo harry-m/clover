@@ -265,6 +265,33 @@ class DockerCompose:
 
         return [s.strip() for s in stdout.strip().split("\n") if s.strip()]
 
+    async def get_service_config(self, service: str) -> Optional[dict]:
+        """Get configuration for a specific service.
+
+        Parses the compose file to extract service configuration including
+        working_dir, volumes, environment, etc.
+
+        Args:
+            service: Service name.
+
+        Returns:
+            Service configuration dict, or None if service not found.
+        """
+        import yaml
+
+        cmd = self._build_cmd("config")
+        returncode, stdout, _ = await run_command(cmd, cwd=self.compose_file.parent)
+
+        if returncode != 0:
+            return None
+
+        try:
+            config = yaml.safe_load(stdout)
+            services = config.get("services", {})
+            return services.get(service)
+        except yaml.YAMLError:
+            return None
+
     async def port(self, service: str, container_port: int) -> Optional[int]:
         """Get the host port mapped to a container port.
 
@@ -424,96 +451,11 @@ class PortManager:
         return result
 
 
-def get_claude_cli_path() -> Optional[Path]:
-    """Find the Claude CLI executable path.
-
-    Returns:
-        Path to claude CLI if found, None otherwise.
-    """
-    claude_path = shutil.which("claude")
-    if claude_path:
-        return Path(claude_path)
-    return None
-
-
-def get_claude_config_dir() -> Path:
-    """Get the Claude configuration directory.
-
-    Returns:
-        Path to ~/.claude directory.
-    """
-    return Path.home() / ".claude"
-
-
-async def copy_to_container(
-    container_name: str,
-    src: Path,
-    dest: str,
-) -> tuple[int, str, str]:
-    """Copy a file or directory into a container.
-
-    Args:
-        container_name: Name of the container.
-        src: Source path on host.
-        dest: Destination path in container.
-
-    Returns:
-        Tuple of (return_code, stdout, stderr).
-    """
-    cmd = ["docker", "cp", str(src), f"{container_name}:{dest}"]
-    return await run_command(cmd)
-
-
-async def inject_claude_into_container(container_name: str) -> bool:
-    """Inject Claude CLI and config into a running container.
-
-    Args:
-        container_name: Name of the container.
-
-    Returns:
-        True if injection succeeded, False otherwise.
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-
-    claude_path = get_claude_cli_path()
-    if not claude_path:
-        logger.warning("Claude CLI not found on host - skipping injection")
-        return False
-
-    # Copy Claude CLI
-    returncode, _, stderr = await copy_to_container(
-        container_name,
-        claude_path,
-        "/usr/local/bin/claude",
-    )
-    if returncode != 0:
-        logger.warning(f"Failed to copy Claude CLI: {stderr}")
-        return False
-
-    # Copy Claude config directory if it exists
-    claude_config = get_claude_config_dir()
-    if claude_config.exists():
-        # First ensure /root exists
-        await run_command(["docker", "exec", container_name, "mkdir", "-p", "/root"])
-
-        returncode, _, stderr = await copy_to_container(
-            container_name,
-            claude_config,
-            "/root/.claude",
-        )
-        if returncode != 0:
-            logger.warning(f"Failed to copy Claude config: {stderr}")
-            # Continue anyway - Claude may still work
-
-    logger.info(f"Injected Claude CLI into container {container_name}")
-    return True
-
-
 async def exec_interactive(
     container_name: str,
     command: list[str] = None,
     workdir: Optional[str] = None,
+    env: Optional[dict[str, str]] = None,
 ) -> None:
     """Execute an interactive command in a container.
 
@@ -523,12 +465,16 @@ async def exec_interactive(
         container_name: Name of the container.
         command: Command to run (default: bash).
         workdir: Working directory in container.
+        env: Environment variables to set.
     """
     import os
 
     cmd = ["docker", "exec", "-it"]
     if workdir:
         cmd.extend(["-w", workdir])
+    if env:
+        for key, value in env.items():
+            cmd.extend(["-e", f"{key}={value}"])
     cmd.append(container_name)
     cmd.extend(command or ["bash"])
 

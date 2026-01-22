@@ -289,6 +289,24 @@ class GitHubWatcher:
             logger.error(f"Failed to get PR #{pr_number}: {e}")
             return None
 
+    async def get_issue(self, issue_number: int) -> Optional[Issue]:
+        """Get a specific issue by number.
+
+        Args:
+            issue_number: Issue number.
+
+        Returns:
+            Issue if found, None otherwise.
+        """
+        path = f"/repos/{self.repo}/issues/{issue_number}"
+
+        try:
+            data = await self._request("GET", path)
+            return Issue.from_api(data)
+        except GitHubError as e:
+            logger.error(f"Failed to get issue #{issue_number}: {e}")
+            return None
+
     async def get_pr_comments(self, pr_number: int) -> list[Comment]:
         """Get comments on a pull request.
 
