@@ -13,6 +13,9 @@ github:
   # Label that triggers Clover to work on issues/PRs (default: clover)
   label: clover
 
+  # Base branch for PRs (default: auto-detect from repo)
+  # base_branch: main
+
 # Daemon settings
 daemon:
   # Seconds between GitHub polling (default: 60)
@@ -27,8 +30,12 @@ daemon:
   # Base directory for worktrees (default: ./worktrees)
   # worktree_base: ./worktrees
 
-  # State file location (default: ./.orchestrator-state.json)
-  # state_file: ./.orchestrator-state.json
+  # State file location (default: ./.clover-state.json)
+  # state_file: ./.clover-state.json
+
+  # Setup script to run after creating a worktree (optional)
+  # Receives environment variables: CLOVER_WORKTREE, CLOVER_BRANCH, etc.
+  # setup_script: scripts/setup-worktree.sh
 
 # Review settings - commands to run during PR review
 review:
@@ -43,8 +50,3 @@ review:
 test:
   # Path to docker-compose file (default: docker-compose.yml)
   compose_file: docker-compose.yml
-
-  # Container for interactive Claude sessions
-  # Leave blank to use first container.
-  # If a container named "develop" exists, it will be used by default.
-  container:

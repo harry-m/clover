@@ -52,7 +52,7 @@ class Config:
     max_concurrent: int = 2
 
     # State file location
-    state_file: Path = field(default_factory=lambda: Path("./.orchestrator-state.json"))
+    state_file: Path = field(default_factory=lambda: Path("./.clover-state.json"))
 
     # Claude settings
     max_turns: int = 50
