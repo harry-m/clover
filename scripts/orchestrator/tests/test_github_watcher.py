@@ -208,50 +208,6 @@ class TestGitHubWatcher:
             assert prs[0].number == 7
 
     @pytest.mark.asyncio
-    async def test_has_merge_comment(self, watcher):
-        """Test checking for merge comment."""
-        mock_comments = [
-            {
-                "id": 1,
-                "body": "Looks good!",
-                "user": {"login": "reviewer"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-            {
-                "id": 2,
-                "body": "/merge",
-                "user": {"login": "owner"},
-                "created_at": "2024-01-01T01:00:00Z",
-            },
-        ]
-
-        with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = mock_comments
-
-            has_trigger = await watcher.has_merge_comment(7)
-
-            assert has_trigger is True
-
-    @pytest.mark.asyncio
-    async def test_has_merge_comment_not_found(self, watcher):
-        """Test when merge comment is not present."""
-        mock_comments = [
-            {
-                "id": 1,
-                "body": "Looks good!",
-                "user": {"login": "reviewer"},
-                "created_at": "2024-01-01T00:00:00Z",
-            },
-        ]
-
-        with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = mock_comments
-
-            has_trigger = await watcher.has_merge_comment(7)
-
-            assert has_trigger is False
-
-    @pytest.mark.asyncio
     async def test_post_comment(self, watcher):
         """Test posting a comment."""
         with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
@@ -292,24 +248,3 @@ class TestGitHubWatcher:
 
             assert pr.number == 7
             assert mock_req.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_merge_pr(self, watcher):
-        """Test merging a PR."""
-        with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
-            mock_req.return_value = {"merged": True}
-
-            success = await watcher.merge_pr(7)
-
-            assert success is True
-            mock_req.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_merge_pr_failure(self, watcher):
-        """Test merge failure."""
-        with patch.object(watcher, "_request", new_callable=AsyncMock) as mock_req:
-            mock_req.side_effect = GitHubError("Merge failed", status_code=405)
-
-            success = await watcher.merge_pr(7)
-
-            assert success is False

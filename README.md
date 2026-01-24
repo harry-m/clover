@@ -2,34 +2,6 @@
 
 A local Python daemon that watches GitHub issues and pull requests, automatically launching Claude Code to implement features and review code.
 
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        GitHub                                    │
-│                                                                  │
-│   1. You label an issue "clover"                                │
-│              │                                                   │
-│              ▼                                                   │
-│   2. Clover implements it, creates PR, labels PR "clover"       │
-│              │                                                   │
-│              ▼                                                   │
-│   3. Clover reviews the PR (runs tests, lints, Claude review)   │
-│              │                                                   │
-│              ▼                                                   │
-│   4. You review and merge                                        │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Label an issue with `clover` and walk away. Clover will:
-1. Create a worktree and branch
-2. Launch Claude to implement the feature
-3. Create a PR and automatically label it `clover`
-4. Review its own PR (running your configured tests and linters)
-5. Post Claude's review comments
-
-You come back to a ready-to-review PR with implementation, tests run, and code review complete.
 
 ## Features
 
@@ -39,6 +11,30 @@ You come back to a ready-to-review PR with implementation, tests run, and code r
 - **Parallel Processing**: Multiple issues processed simultaneously using git worktrees
 - **Manual Testing**: Use `clover test` to interactively test PRs with Claude's help
 
+
+## How It Works
+
+1. You label an issue `clover`
+2. Clover implements it, creates PR, labels PR `clover`
+3. Clover reviews the PR (runs tests, lints, Claude review)
+4. You review and merge
+
+You can also label your own PR with `clover` if you want Claude to review it.
+
+
+When you label an issue with `clover`, Clover will:
+
+1. Create a git worktree and branch
+2. Launch Claude to implement the feature
+3. Create a PR and automatically label it `clover`
+4. Review its own PR (running your configured tests and linters)
+5. Post Claude's review comments
+
+You can then review the PR, make any changes (with Claude's assistance, if you want). When you're happy, commit and push as normal, then merge the PR.
+
+For manual testing, run `clover test <PR>` to checkout a PR branch and launch Claude with full context. When you're done, Clover checks for uncommitted or unpushed changes and returns you to your original branch.
+
+
 ## Installation
 
 ### Prerequisites
@@ -47,14 +43,20 @@ You come back to a ready-to-review PR with implementation, tests run, and code r
 - **Git** with worktree support
 - **Claude Code CLI** installed and authenticated
 - **GitHub CLI** (recommended) or a GitHub Personal Access Token
-- **Docker** (optional, for `clover test`)
 
 ### Install Clover
 
 ```bash
-# Clone and install
+# Clone the repository
 git clone https://github.com/harry-m/clover.git
 cd clover
+
+# Option A: pipx (recommended for CLI tools)
+pipx install -e .
+
+# Option B: Virtual environment (for development)
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
 # Verify installation
@@ -133,23 +135,6 @@ daemon:
   setup_script: scripts/setup-worktree.sh
 ```
 
-### Optional: Docker for Testing
-
-For `clover test`, set up your `docker-compose.yml` with your app services:
-
-```yaml
-services:
-  postgres:
-    image: postgres:15
-    # ...
-
-  backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
-    # ...
-```
-
 ## Configuration
 
 Full `clover.yaml` reference:
@@ -175,9 +160,6 @@ review:
     - pytest
     - ruff check .
     - mypy src/
-
-test:
-  compose_file: docker-compose.yml
 ```
 
 ## Usage
@@ -235,27 +217,20 @@ These run in the PR's worktree before Claude reviews. Results are included in th
 For hands-on testing of PRs:
 
 ```bash
-# Start testing - checks out PR, starts Docker, launches Claude
-clover test start 184
+# Start testing - checks out PR branch, launches Claude with context
+clover test 184          # By PR number
+clover test #184         # With hash prefix
+clover test feature/foo  # By branch name
 
-# Claude has full context: PR description, linked issue, your role
+# Claude knows the PR/issue context and can look them up
 
-# If you exit Claude, resume later
+# If you exit Claude, resume the session
 clover test resume
-
-# View Docker logs
-clover test logs -f
-
-# Done testing - stops Docker, returns to original branch
-clover test stop
 ```
 
-Options:
-```bash
-clover test start 184 --no-docker   # Skip Docker
-clover test start 184 --no-claude   # Just setup, no Claude
-clover test stop --keep-branch      # Stay on PR branch
-```
+When you exit Claude, Clover checks for uncommitted or unpushed changes:
+- If clean: returns you to your original branch
+- If dirty: stays on branch and shows what needs attention
 
 ### Other Commands
 

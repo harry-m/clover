@@ -24,7 +24,6 @@ if sys.platform == "win32":
     asyncio.proactor_events._ProactorBasePipeTransport.__del__ = _silenced_del
 
 from .config import load_config
-from .docker_utils import DockerError
 from .main import async_main
 from .state import State, WorkItemStatus, WorkItemType
 from .test_session import TestSessionManager
@@ -182,24 +181,6 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if not (in_progress or completed or failed):
         print("No work items tracked yet.")
-
-    # Show active test session
-    manager = TestSessionManager(config)
-    session = _run_async(manager.status())
-
-    if session:
-        print()
-        print("Active Test Session")
-        print("-" * 50)
-        if session.pr_number:
-            print(f"● PR #{session.pr_number}: {session.pr_title}")
-        else:
-            print(f"● Branch: {session.branch_name}")
-        if session.linked_issue:
-            print(f"  Linked issue: #{session.linked_issue}")
-        if session.original_branch:
-            print(f"  Original branch: {session.original_branch}")
-        print(f"  Stop: clover test stop")
 
     return 0
 
@@ -530,31 +511,23 @@ test:
 # Test command handlers
 
 def cmd_test(args: argparse.Namespace) -> int:
-    """Start a test session for a PR."""
+    """Start a test session for a PR or branch."""
     try:
         config = load_config(get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
 
-    # Validate PR number
-    if not args.pr_number.isdigit():
-        print(f"Error: Expected a PR number, got '{args.pr_number}'")
+    # Parse target - strip leading # if present
+    target = args.target.lstrip("#") if args.target else None
+    if not target:
+        print("Error: No target specified. Usage: clover test <PR-number-or-branch>")
         return 1
 
     manager = TestSessionManager(config)
 
     try:
-        skip_docker = getattr(args, "no_docker", False)
-        no_claude = getattr(args, "no_claude", False)
-        _run_async(manager.start(
-            int(args.pr_number),
-            skip_docker=skip_docker,
-            no_claude=no_claude,
-        ))
-    except DockerError as e:
-        print(f"Docker error: {e}")
-        return 1
+        _run_async(manager.start(target))
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
@@ -566,7 +539,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 
 def cmd_test_resume(args: argparse.Namespace) -> int:
-    """Re-launch Claude for the current test session."""
+    """Resume previous Claude session."""
     try:
         config = load_config(get_repo_path(args))
     except ValueError as e:
@@ -576,88 +549,11 @@ def cmd_test_resume(args: argparse.Namespace) -> int:
     manager = TestSessionManager(config)
 
     try:
-        manager.resume()
+        _run_async(manager.resume())
     except ValueError as e:
         print(f"Error: {e}")
         return 1
 
-    return 0
-
-
-def cmd_test_status(args: argparse.Namespace) -> int:
-    """Show current test session status."""
-    try:
-        config = load_config(get_repo_path(args))
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        return 1
-
-    manager = TestSessionManager(config)
-    state = _run_async(manager.status())
-
-    if not state:
-        print("No active test session.")
-        print("Run 'clover test start <PR>' to start testing a PR.")
-        return 0
-
-    print(f"Testing PR #{state.pr_number}: {state.pr_title}" if state.pr_number
-          else f"Testing branch: {state.branch_name}")
-    print(f"  Branch: {state.branch_name}")
-    if state.original_branch:
-        print(f"  Will return to: {state.original_branch}")
-    print()
-    print("Commands:")
-    print("  clover test attach  - Launch Claude with PR context")
-    print("  clover test stop    - Stop testing and return to original branch")
-
-    return 0
-
-
-def cmd_test_stop(args: argparse.Namespace) -> int:
-    """Stop the current test session."""
-    try:
-        config = load_config(get_repo_path(args))
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        return 1
-
-    manager = TestSessionManager(config)
-    keep_branch = getattr(args, "keep_branch", False)
-
-    try:
-        _run_async(manager.stop(keep_branch=keep_branch))
-    except ValueError as e:
-        print(f"Error: {e}")
-        return 1
-
-    return 0
-
-
-def cmd_test_logs(args: argparse.Namespace) -> int:
-    """Show docker compose logs for current test session."""
-    try:
-        config = load_config(get_repo_path(args))
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        return 1
-
-    manager = TestSessionManager(config)
-    state = _run_async(manager.status())
-
-    if not state:
-        print("No active test session.")
-        return 1
-
-    # Run docker compose logs
-    import subprocess
-    compose_file = config.repo_path / config.test.compose_file
-    cmd = ["docker", "compose", "-f", str(compose_file), "-p", "clover-test", "logs"]
-    if getattr(args, "follow", False):
-        cmd.append("-f")
-    if getattr(args, "tail", None):
-        cmd.extend(["--tail", str(args.tail)])
-
-    subprocess.run(cmd, cwd=config.repo_path)
     return 0
 
 
@@ -738,57 +634,15 @@ def main() -> int:
         help="Overwrite existing clover.yaml",
     )
 
-    # Test command with subcommands
-    test_parser = subparsers.add_parser("test", help="Test a PR locally")
-    test_subparsers = test_parser.add_subparsers(dest="test_command", help="Test commands")
-
-    # test start <PR> - start testing a PR
-    test_start_parser = test_subparsers.add_parser("start", help="Start testing a PR")
-    test_start_parser.add_argument(
-        "pr_number",
-        help="PR number to test",
+    # Test command - simplified: clover test <target> or clover test resume
+    test_parser = subparsers.add_parser("test", help="Test a PR or branch locally")
+    test_parser.add_argument(
+        "target",
+        nargs="?",
+        help="PR number (184, #184) or branch name",
     )
-    test_start_parser.add_argument(
-        "--no-docker",
-        action="store_true",
-        help="Skip starting docker containers",
-    )
-    test_start_parser.add_argument(
-        "--no-claude",
-        action="store_true",
-        help="Don't launch Claude after setup",
-    )
-
-    # test resume - re-launch Claude for current test
-    test_subparsers.add_parser(
-        "resume",
-        help="Re-launch Claude for current test session",
-    )
-
-    # test status - show current test status
-    test_subparsers.add_parser("status", help="Show current test status")
-
-    # test stop - stop current test
-    test_stop_parser = test_subparsers.add_parser("stop", help="Stop current test session")
-    test_stop_parser.add_argument(
-        "--keep-branch",
-        action="store_true",
-        help="Don't switch back to original branch",
-    )
-
-    # test logs - show docker logs
-    test_logs_parser = test_subparsers.add_parser("logs", help="Show docker compose logs")
-    test_logs_parser.add_argument(
-        "-f", "--follow",
-        action="store_true",
-        help="Follow log output",
-    )
-    test_logs_parser.add_argument(
-        "-n", "--tail",
-        type=int,
-        default=100,
-        help="Number of lines to show (default: 100)",
-    )
+    test_subparsers = test_parser.add_subparsers(dest="test_command")
+    test_subparsers.add_parser("resume", help="Resume previous Claude session")
 
     args = parser.parse_args()
 
@@ -812,16 +666,10 @@ def main() -> int:
         return cmd_init(args)
     elif args.command == "test":
         # Handle test subcommands
-        if args.test_command == "start":
-            return cmd_test(args)
-        elif args.test_command == "resume":
+        if args.test_command == "resume":
             return cmd_test_resume(args)
-        elif args.test_command == "status":
-            return cmd_test_status(args)
-        elif args.test_command == "stop":
-            return cmd_test_stop(args)
-        elif args.test_command == "logs":
-            return cmd_test_logs(args)
+        elif args.target:
+            return cmd_test(args)
         else:
             test_parser.print_help()
             return 0

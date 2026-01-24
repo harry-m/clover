@@ -2,8 +2,8 @@
 
 This module provides a simple workflow for testing PRs:
 1. Checkout the PR branch in the main repo
-2. Start docker compose
-3. Launch local Claude with PR context
+2. Launch local Claude with PR context
+3. Warn on uncommitted/unpushed changes on exit
 
 Only one test session at a time - no worktrees, no complexity.
 """
@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from .docker_utils import DockerCompose, DockerError
 from .github_watcher import GitHubWatcher
+from .worktree_manager import WorktreeManager
 
 if TYPE_CHECKING:
     from .config import Config
@@ -33,38 +33,26 @@ logger = logging.getLogger(__name__)
 class TestState:
     """Current test session state."""
 
+    original_branch: str
     branch_name: str
     pr_number: Optional[int] = None
-    pr_title: Optional[str] = None
-    pr_body: Optional[str] = None
     linked_issue: Optional[int] = None
-    issue_title: Optional[str] = None
-    issue_body: Optional[str] = None
-    original_branch: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
+            "original_branch": self.original_branch,
             "branch_name": self.branch_name,
             "pr_number": self.pr_number,
-            "pr_title": self.pr_title,
-            "pr_body": self.pr_body,
             "linked_issue": self.linked_issue,
-            "issue_title": self.issue_title,
-            "issue_body": self.issue_body,
-            "original_branch": self.original_branch,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> TestState:
         return cls(
+            original_branch=data["original_branch"],
             branch_name=data["branch_name"],
             pr_number=data.get("pr_number"),
-            pr_title=data.get("pr_title"),
-            pr_body=data.get("pr_body"),
             linked_issue=data.get("linked_issue"),
-            issue_title=data.get("issue_title"),
-            issue_body=data.get("issue_body"),
-            original_branch=data.get("original_branch"),
         )
 
 
@@ -79,6 +67,7 @@ class TestSessionManager:
         self.config = config
         self.repo_path = config.repo_path
         self.github = GitHubWatcher(config)
+        self.worktree_manager = WorktreeManager(config, config.repo_path)
         self._state_file = config.state_file.parent / ".clover-test-state.json"
 
     def _load_state(self) -> Optional[TestState]:
@@ -120,69 +109,76 @@ class TestSessionManager:
 
     async def _has_uncommitted_changes(self) -> bool:
         """Check for uncommitted changes."""
-        returncode, _, _ = await self._run_git("diff", "--quiet", "HEAD")
-        return returncode != 0
+        _, output, _ = await self._run_git("status", "--porcelain")
+        return bool(output.strip())
 
-    async def _resolve_pr(self, pr_number: int) -> dict:
-        """Resolve PR to full details including linked issue."""
-        pr = await self.github.get_pr(pr_number)
-        if pr is None:
-            raise ValueError(f"PR #{pr_number} not found")
+    async def _has_unpushed_commits(self) -> tuple[bool, int]:
+        """Check for commits ahead of remote.
 
-        result = {
-            "branch": pr.branch,
-            "title": pr.title,
-            "body": pr.body,
-            "linked_issue": pr.linked_issue,
-            "issue_title": None,
-            "issue_body": None,
-        }
+        Returns:
+            Tuple of (has_unpushed, count).
+        """
+        _, output, _ = await self._run_git(
+            "rev-list", "@{upstream}..HEAD", "--count"
+        )
+        try:
+            count = int(output.strip())
+            return count > 0, count
+        except ValueError:
+            return False, 0
 
-        # Fetch linked issue details if available
-        if pr.linked_issue:
-            issue = await self.github.get_issue(pr.linked_issue)
-            if issue:
-                result["issue_title"] = issue.title
-                result["issue_body"] = issue.body
+    async def _find_pr_for_branch(self, branch_name: str) -> Optional[int]:
+        """Find an open PR for the given branch.
 
-        return result
+        Returns:
+            PR number if found, None otherwise.
+        """
+        prs = await self.github.get_open_prs()
+        for pr in prs:
+            if pr.branch == branch_name:
+                return pr.number
+        return None
 
-    def _get_compose_file(self) -> Path:
-        """Get docker-compose file path."""
-        compose_path = self.repo_path / self.config.test.compose_file
-        if not compose_path.exists():
-            raise FileNotFoundError(
-                f"Docker Compose file not found: {compose_path}\n"
-                f"Configure 'test.compose_file' in clover.yaml"
-            )
-        return compose_path
+    async def _check_stale_worktrees(self, target_branch: str) -> None:
+        """Check for and clean up stale worktrees with the target branch.
 
-    async def start(
-        self,
-        pr_number: int,
-        skip_docker: bool = False,
-        no_claude: bool = False,
-    ) -> TestState:
-        """Start testing a PR.
+        Raises:
+            ValueError: If a worktree has uncommitted changes.
+        """
+        worktrees = await self.worktree_manager.list_worktrees()
+        for wt in worktrees:
+            if wt.branch == target_branch:
+                # Check if worktree has changes
+                has_changes = await self.worktree_manager.has_uncommitted_changes(wt.path)
+                if has_changes:
+                    raise ValueError(
+                        f"Worktree at {wt.path} has uncommitted changes on branch {target_branch}.\n"
+                        f"Please commit or discard changes, then remove the worktree:\n"
+                        f"  cd {wt.path} && git status\n"
+                        f"  git worktree remove {wt.path}"
+                    )
+                # Auto-cleanup stale worktree
+                logger.info(f"Cleaning up stale worktree at {wt.path}")
+                await self.worktree_manager.cleanup_worktree(wt.path)
+
+    async def start(self, target: str) -> TestState:
+        """Start testing a PR or branch.
 
         Args:
-            pr_number: The PR number to test.
-            skip_docker: Skip starting docker containers.
-            no_claude: Don't launch Claude after setup.
+            target: PR number (as string) or branch name.
 
         Returns:
             The test state.
 
         Raises:
-            ValueError: If PR not found or uncommitted changes exist.
-            DockerError: If docker fails to start.
+            ValueError: If PR not found, uncommitted changes exist, or other errors.
         """
         # Check for existing test session
         existing = self._load_state()
         if existing:
             raise ValueError(
-                f"Already testing PR #{existing.pr_number or existing.branch_name}.\n"
-                f"Run 'clover test stop' first."
+                f"Already testing {'PR #' + str(existing.pr_number) if existing.pr_number else existing.branch_name}.\n"
+                f"Run 'clover test resume' to continue, or exit Claude and run again."
             )
 
         # Check for uncommitted changes
@@ -191,57 +187,78 @@ class TestSessionManager:
                 "You have uncommitted changes. Commit or stash them first."
             )
 
-        # Resolve PR with full details
-        pr_info = await self._resolve_pr(pr_number)
-        logger.info(f"Testing PR #{pr_number}: {pr_info['title']}")
+        # Parse target - determine if PR number or branch name
+        pr_number = None
+        branch_name = None
+        linked_issue = None
+
+        if target.isdigit():
+            # Treat as PR number
+            pr_number = int(target)
+            pr = await self.github.get_pr(pr_number)
+            if pr is None:
+                raise ValueError(f"PR #{pr_number} not found")
+            branch_name = pr.branch
+            linked_issue = pr.linked_issue
+            logger.info(f"Testing PR #{pr_number}: {pr.title}")
+        else:
+            # Treat as branch name
+            branch_name = target
+            # Try to find associated PR
+            pr_number = await self._find_pr_for_branch(branch_name)
+            if pr_number:
+                pr = await self.github.get_pr(pr_number)
+                if pr:
+                    linked_issue = pr.linked_issue
+                logger.info(f"Testing branch {branch_name} (PR #{pr_number})")
+            else:
+                logger.info(f"Testing branch {branch_name} (no associated PR)")
+
+        # Check for stale worktrees
+        await self._check_stale_worktrees(branch_name)
 
         # Save current branch
         original_branch = await self._get_current_branch()
 
-        # Fetch and checkout PR branch
-        branch = pr_info['branch']
-        logger.info(f"Checking out {branch}...")
-        await self._run_git("fetch", "origin", branch)
-        returncode, _, stderr = await self._run_git("checkout", branch)
+        # Fetch and checkout target branch
+        logger.info(f"Checking out {branch_name}...")
+        await self._run_git("fetch", "origin", branch_name)
+        returncode, _, stderr = await self._run_git("checkout", branch_name)
         if returncode != 0:
-            raise ValueError(f"Failed to checkout {branch}: {stderr}")
+            # Branch might not exist locally, try tracking remote
+            returncode, _, stderr = await self._run_git(
+                "checkout", "-b", branch_name, f"origin/{branch_name}"
+            )
+            if returncode != 0:
+                raise ValueError(f"Failed to checkout {branch_name}: {stderr}")
 
         # Pull latest
-        await self._run_git("pull", "origin", branch)
+        await self._run_git("pull", "origin", branch_name)
 
-        # Save state with full PR context
+        # Save state
         state = TestState(
-            branch_name=branch,
-            pr_number=pr_number,
-            pr_title=pr_info['title'],
-            pr_body=pr_info['body'],
-            linked_issue=pr_info['linked_issue'],
-            issue_title=pr_info['issue_title'],
-            issue_body=pr_info['issue_body'],
             original_branch=original_branch,
+            branch_name=branch_name,
+            pr_number=pr_number,
+            linked_issue=linked_issue,
         )
         self._save_state(state)
 
-        # Start docker in background
-        if not skip_docker:
-            compose_file = self._get_compose_file()
-            logger.info("Starting Docker containers in background...")
-            # Start docker compose without waiting
-            subprocess.Popen(
-                ["docker", "compose", "-f", str(compose_file), "-p", "clover-test", "up", "-d"],
-                cwd=self.repo_path,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
         # Launch Claude
-        if not no_claude:
-            self._launch_claude(state)
+        await self._launch_claude(state, resume=False)
+
+        # Run post-exit checks
+        await self._post_exit_checks(state)
 
         return state
 
-    def _launch_claude(self, state: TestState) -> None:
-        """Launch Claude with PR context."""
+    async def _launch_claude(self, state: TestState, resume: bool = False) -> None:
+        """Launch Claude with PR context.
+
+        Args:
+            state: Current test state.
+            resume: If True, use --resume flag.
+        """
         # Find claude executable
         claude_path = shutil.which("claude")
         if not claude_path:
@@ -255,101 +272,89 @@ class TestSessionManager:
             logger.error("Claude not found in PATH. Install with: npm install -g @anthropic-ai/claude-code")
             return
 
-        # Build rich context with PR and issue details
-        context_lines = ["# Test Session Context", ""]
-
-        if state.pr_number:
-            context_lines.append(f"## PR #{state.pr_number}: {state.pr_title}")
-            context_lines.append("")
-            if state.pr_body:
-                context_lines.append("### PR Description")
-                context_lines.append(state.pr_body)
-                context_lines.append("")
+        if resume:
+            logger.info("Resuming previous Claude session...")
+            subprocess.run(
+                [claude_path, "--resume"],
+                cwd=self.repo_path,
+                shell=(sys.platform == "win32"),
+            )
         else:
-            context_lines.append(f"## Branch: {state.branch_name}")
-            context_lines.append("")
+            # Build simple prompt
+            if state.pr_number and state.linked_issue:
+                prompt = (
+                    f"We are testing PR #{state.pr_number} which implements issue #{state.linked_issue}. "
+                    f"Have a look at the changes and the PR description, then let's talk about them."
+                )
+            elif state.pr_number:
+                prompt = (
+                    f"We are testing PR #{state.pr_number}. "
+                    f"Have a look at the changes and the PR description, then let's talk about them."
+                )
+            else:
+                prompt = (
+                    f"We are testing branch {state.branch_name}. "
+                    f"Have a look at the changes, then let's talk about them."
+                )
 
-        if state.linked_issue:
-            context_lines.append(f"## Linked Issue #{state.linked_issue}: {state.issue_title}")
-            context_lines.append("")
-            if state.issue_body:
-                context_lines.append("### Issue Description")
-                context_lines.append(state.issue_body)
-                context_lines.append("")
+            logger.info(f"Launching Claude for {'PR #' + str(state.pr_number) if state.pr_number else state.branch_name}...")
 
-        context_lines.extend([
-            "## Environment",
-            "- The PR code is checked out in this directory",
-            "- Docker containers are starting in the background",
-            "",
-            "## Your Role",
-            "Help the user test and verify the changes in this PR.",
-            "Focus on the requirements described in the issue and PR description above.",
-        ])
+            subprocess.run(
+                [claude_path, prompt],
+                cwd=self.repo_path,
+                shell=(sys.platform == "win32"),
+            )
 
-        context = "\n".join(context_lines)
+    async def _post_exit_checks(self, state: TestState) -> None:
+        """Run checks after Claude exits.
 
-        # Write context to file for Claude to read
-        context_file = self.repo_path / ".clover-test-context.md"
-        context_file.write_text(context)
-
-        logger.info(f"Launching Claude for PR #{state.pr_number}..." if state.pr_number
-                    else f"Launching Claude for {state.branch_name}...")
-
-        # Launch Claude with initial prompt to read context
-        initial_prompt = "Read .clover-test-context.md for your task context, then greet me."
-        subprocess.run(
-            [claude_path, initial_prompt],
-            cwd=self.repo_path,
-            shell=(sys.platform == "win32"),
-        )
-
-    async def stop(self, keep_branch: bool = False) -> None:
-        """Stop the current test session.
-
-        Args:
-            keep_branch: Don't switch back to original branch.
-
-        Raises:
-            ValueError: If no test session is active.
+        Checks for uncommitted changes and unpushed commits, warns if found,
+        otherwise returns to original branch and clears state.
         """
-        state = self._load_state()
-        if not state:
-            raise ValueError("No active test session. Run 'clover test start <PR>' first.")
+        has_uncommitted = await self._has_uncommitted_changes()
+        has_unpushed, unpushed_count = await self._has_unpushed_commits()
 
-        # Stop docker
-        try:
-            compose_file = self._get_compose_file()
-            compose = DockerCompose(compose_file, project_name="clover-test")
-            logger.info("Stopping Docker containers...")
-            await compose.down(volumes=False)
-        except FileNotFoundError:
-            logger.warning("Docker compose file not found, skipping container cleanup")
+        if has_uncommitted:
+            _, status_output, _ = await self._run_git("status", "--short")
+            print()
+            print("⚠️  You have uncommitted changes:")
+            print(status_output)
+            print()
+            print("Commit them with: git add . && git commit -m 'your message'")
 
-        # Switch back to original branch
-        if not keep_branch and state.original_branch:
-            logger.info(f"Switching back to {state.original_branch}...")
+        if has_unpushed:
+            print()
+            print(f"⚠️  You have {unpushed_count} unpushed commit(s).")
+            print(f"Push them with: git push origin {state.branch_name}")
+
+        if has_uncommitted or has_unpushed:
+            print()
+            print(f"Staying on branch {state.branch_name}.")
+            print("Run 'clover test resume' to continue testing.")
+            # Keep state file so resume works
+        else:
+            # All clean - return to original branch
+            logger.info(f"Returning to {state.original_branch}...")
             await self._run_git("checkout", state.original_branch)
+            self._save_state(None)
+            print()
+            print(f"✓ Returned to {state.original_branch}")
 
-        # Clear state
-        self._save_state(None)
-
-        if state.pr_number:
-            logger.info(f"Stopped testing PR #{state.pr_number}")
-        else:
-            logger.info(f"Stopped testing {state.branch_name}")
-
-    async def status(self) -> Optional[TestState]:
-        """Get current test status."""
-        return self._load_state()
-
-    def resume(self) -> None:
-        """Re-launch Claude for the current test session.
+    async def resume(self) -> None:
+        """Resume previous Claude session.
 
         Raises:
             ValueError: If no test session is active.
         """
         state = self._load_state()
         if not state:
-            raise ValueError("No active test session. Run 'clover test start <PR>' first.")
-        self._launch_claude(state)
+            raise ValueError("No active test session. Run 'clover test <PR>' first.")
+
+        # Make sure we're on the right branch
+        current = await self._get_current_branch()
+        if current != state.branch_name:
+            logger.info(f"Switching to {state.branch_name}...")
+            await self._run_git("checkout", state.branch_name)
+
+        await self._launch_claude(state, resume=True)
+        await self._post_exit_checks(state)
