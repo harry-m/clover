@@ -45,6 +45,7 @@ class Orchestrator:
         self.worktrees = WorktreeManager(config, repo_path=config.repo_path)
         self.claude = ClaudeRunner(config)
         self._shutdown = False
+        self._shutdown_event: asyncio.Event = asyncio.Event()
         self._active_tasks: set[asyncio.Task] = set()
 
     def _log(self, message: str) -> None:
@@ -145,8 +146,14 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Error in poll cycle: {e}", exc_info=True)
 
-            # Wait for next poll interval
-            await asyncio.sleep(self.config.poll_interval)
+            # Wait for next poll interval (interruptible by shutdown event)
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=self.config.poll_interval,
+                )
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, continue polling
 
         # Cleanup
         logger.info("Shutting down...")
@@ -156,6 +163,7 @@ class Orchestrator:
         """Signal the orchestrator to stop."""
         logger.info("Stop requested")
         self._shutdown = True
+        self._shutdown_event.set()
 
         # Cancel active tasks
         for task in self._active_tasks:
