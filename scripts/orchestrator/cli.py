@@ -183,31 +183,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not (in_progress or completed or failed):
         print("No work items tracked yet.")
 
-    # Show test sessions
+    # Show active test session
     manager = TestSessionManager(config)
-    sessions = _run_async(manager.list_sessions())
+    session = _run_async(manager.status())
 
-    if sessions:
+    if session:
         print()
-        print("Test Sessions")
+        print("Active Test Session")
         print("-" * 50)
-        for session in sessions:
-            status_icon = "●" if session.status == "running" else "○"
-            if session.pr_number:
-                print(f"{status_icon} PR #{session.pr_number}: {session.pr_title}")
-            else:
-                print(f"{status_icon} {session.branch_name}")
-            print(f"  Status: {session.status}")
-            print(f"  Worktree: {session.worktree_path}")
-            if session.ports:
-                for port_key, host_port in session.ports.items():
-                    service, container_port = port_key.split(":")
-                    print(f"  Port: {service}:{container_port} -> localhost:{host_port}")
-            ref = str(session.pr_number) if session.pr_number else session.branch_name
-            if session.status == "running":
-                print(f"  Stop: clover test stop {ref}")
-            else:
-                print(f"  Cleanup: clover test cleanup {ref}")
+        if session.pr_number:
+            print(f"● PR #{session.pr_number}: {session.pr_title}")
+        else:
+            print(f"● Branch: {session.branch_name}")
+        if session.linked_issue:
+            print(f"  Linked issue: #{session.linked_issue}")
+        if session.original_branch:
+            print(f"  Original branch: {session.original_branch}")
+        print(f"  Stop: clover test stop")
 
     return 0
 
