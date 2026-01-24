@@ -472,7 +472,7 @@ class Orchestrator:
             # Post review as comment
             review_comment = f"""## 🤖 Automated Code Review
 
-{checks_output}{result.output[:4000]}
+{checks_output}{result.output[:60000]}
 
 ---
 *— Clover, the Claude Overseer*
