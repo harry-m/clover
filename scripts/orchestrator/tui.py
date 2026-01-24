@@ -87,8 +87,8 @@ class CloverDisplay:
                 agent.set_tool(tool_name)
             elif "completed" in line.lower() or "done" in line.lower():
                 agent.set_tool(None)
-            # Trigger display refresh to show new output
-            display.refresh()
+            # Note: Don't call refresh() here - let Rich's automatic timer handle it
+            # to avoid excessive refreshes (20-50+/sec during heavy output)
 
         return callback
 
@@ -111,11 +111,12 @@ class CloverDisplay:
             lines = list(self.system_log)
             content = Text.from_markup("\n".join(lines))
 
+        # Use fixed height to prevent layout jitter
         return Panel(
             content,
             title="[bold]System Log[/bold]",
             border_style="blue",
-            height=min(12, len(self.system_log) + 4),
+            height=12,
         )
 
     def _render_agent_panel(self, agent: AgentContext) -> Panel:
@@ -160,13 +161,9 @@ class CloverDisplay:
             subtitle.append("Starting...", style="dim italic")
 
         # Build content from output lines
-        # Show more lines for completed/failed agents
-        if agent.status in ("completed", "failed"):
-            num_lines = 12
-            panel_height = 16
-        else:
-            num_lines = 6
-            panel_height = 10
+        # Use fixed panel height to prevent layout jitter when status changes
+        num_lines = 8
+        panel_height = 12
 
         content = Text()
         if agent.output_lines:
@@ -244,7 +241,7 @@ class CloverDisplay:
         self._live = Live(
             self.render(),
             console=self.console,
-            refresh_per_second=4,
+            refresh_per_second=10,
             screen=True,
         )
         self._live.start()

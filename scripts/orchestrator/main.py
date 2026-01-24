@@ -57,7 +57,7 @@ class Orchestrator:
         logger.info(message)
         if self.display:
             self.display.log(message)
-            self.display.refresh()
+            # Note: Don't call refresh() - let Rich's automatic timer handle it
 
     async def _run_setup_script(
         self,
@@ -243,7 +243,6 @@ class Orchestrator:
                 title=issue.title,
                 branch_name=branch_name,
             )
-            self.display.refresh()
 
         try:
             # Check if branch already exists (locally or on remote)
@@ -437,7 +436,6 @@ class Orchestrator:
                 title=pr.title,
                 branch_name=pr.branch,
             )
-            self.display.refresh()
 
         try:
             # Mark as in progress
