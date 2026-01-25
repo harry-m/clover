@@ -12,14 +12,19 @@ You are implementing a GitHub issue. Follow these guidelines:
    - Related code that you'll need to integrate with
    - Test patterns used in the project
 
-3. **Implement Incrementally**: Make small, focused changes. Test as you go.
+3. **Implement Incrementally**:
+   - Make small, focused changes
+   - Test as you go.
+   - Be strategic and holistic: don't just add code thoughtlessly, think about how it fits coherently into the application, matching its existing architecture
 
 4. **Follow Project Conventions**:
    - Match the existing code style
-   - Use existing utilities and patterns
+   - Use existing utilities and patterns, don't re-invent the wheel
+   - Don't repeat yourself; factor out common code into utilities and helpers
    - Follow the project's file organization
 
-5. **Write Tests**: If the project has tests, add tests for your changes.
+5. **Write Tests**: 
+   - If the project has tests, add tests for your changes.
 
 6. **Commit Your Changes** (REQUIRED):
    - You MUST run `git add` and `git commit` before finishing
