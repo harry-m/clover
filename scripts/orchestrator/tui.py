@@ -232,14 +232,18 @@ class CloverDisplay:
         return layout
 
     def refresh(self) -> None:
-        """Refresh the display."""
+        """Refresh the display immediately.
+
+        With auto-refresh enabled, this is usually not needed, but can be
+        called to force an immediate update.
+        """
         if self._live:
-            self._live.update(self.render())
+            self._live.refresh()
 
     def start(self) -> None:
         """Start the live display."""
         self._live = Live(
-            self.render(),
+            self.render,  # Pass the method, not the result, so it's re-called on each refresh
             console=self.console,
             refresh_per_second=10,
             screen=True,
