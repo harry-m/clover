@@ -646,3 +646,48 @@ Use `git add` to stage files and `git commit` to commit them.
             # Only give git-related tools for this focused task
             allowed_tools=["Bash", "Read", "Edit", "Glob", "Grep"],
         )
+
+    async def fix_failing_tests(
+        self,
+        test_output: str,
+        context: str,
+        cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+    ) -> ClaudeResult:
+        """Run Claude to fix failing tests.
+
+        Args:
+            test_output: Output from the failing test run.
+            context: Description of what was being worked on.
+            cwd: Worktree path.
+            on_output: Optional callback for output lines.
+
+        Returns:
+            ClaudeResult.
+        """
+        prompt = f"""The test suite is failing. Please fix the issues and commit your changes.
+
+## Context
+
+You were working on: {context}
+
+## Test Failures
+
+```
+{test_output}
+```
+
+---
+
+Instructions:
+1. Analyze the test failures to understand what's broken
+2. Fix the code to make the tests pass
+3. You can run specific failing tests to verify your fixes (e.g., `pytest path/to/test.py::test_name -v`)
+4. Do NOT run the entire test suite - Clover will do that after you commit
+5. Once fixed, commit your changes with `git add` and `git commit`
+"""
+        return await self.run(
+            prompt=prompt,
+            cwd=cwd,
+            on_output=on_output,
+        )

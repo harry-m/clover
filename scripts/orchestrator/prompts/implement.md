@@ -14,7 +14,8 @@ You are implementing a GitHub issue. Follow these guidelines:
 
 3. **Implement Incrementally**:
    - Make small, focused changes
-   - Test as you go.
+   - Run specific tests to verify your changes work (e.g., `pytest path/to/test.py::test_name -v`)
+   - Do NOT run the entire test suite - Clover will run it after you commit
    - Be strategic and holistic: don't just add code thoughtlessly, think about how it fits coherently into the application, matching its existing architecture
 
 4. **Follow Project Conventions**:
@@ -43,7 +44,7 @@ You are implementing a GitHub issue. Follow these guidelines:
 Before finishing:
 - [ ] Changes are committed with `git add` and `git commit`
 - [ ] Code compiles/runs without errors
-- [ ] Tests pass (if applicable)
+- [ ] You've verified key functionality with targeted tests (Clover will run the full suite)
 - [ ] No obvious security issues
 - [ ] No hardcoded secrets or credentials
 - [ ] Error cases are handled appropriately

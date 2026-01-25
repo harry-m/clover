@@ -18,6 +18,8 @@ You are implementing code review suggestions for a pull request. Your goal is to
    - Address the specific feedback items
    - Don't make unrelated changes or refactors
    - Keep changes minimal and targeted
+   - Run specific tests to verify your fixes (e.g., `pytest path/to/test.py::test_name -v`)
+   - Do NOT run the entire test suite - Clover will run it after you commit
 
 4. **Follow Project Conventions**:
    - Match the existing code style
@@ -41,6 +43,7 @@ Before finishing:
 - [ ] Changes are committed with `git add` and `git commit`
 - [ ] All blocking issues have been addressed
 - [ ] Code compiles/runs without errors
+- [ ] You've verified key functionality with targeted tests (Clover will run the full suite)
 - [ ] Changes don't introduce new issues
 
 ## Output

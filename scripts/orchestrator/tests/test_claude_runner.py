@@ -62,6 +62,13 @@ def create_mock_process(stdout_lines: list[bytes], stderr_data: bytes = b"", ret
     mock_proc.stderr = MagicMock()
     mock_proc.stderr.read = mock_stderr_read
 
+    # Mock stdin for prompts passed via stdin (multi-line prompts)
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.write = MagicMock()
+    mock_proc.stdin.drain = AsyncMock()
+    mock_proc.stdin.close = MagicMock()
+    mock_proc.stdin.wait_closed = AsyncMock()
+
     # Mock wait() as async
     mock_proc.wait = AsyncMock(return_value=returncode)
     mock_proc.kill = MagicMock()
