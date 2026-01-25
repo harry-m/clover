@@ -367,7 +367,7 @@ class Orchestrator:
                 uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
                 logger.warning(
                     f"Issue #{issue.number}: Claude left uncommitted changes, "
-                    f"retrying with commit instructions"
+                    f"retrying with commit instructions. Files:\n{uncommitted_status}"
                 )
 
                 on_output = self.display.get_output_callback(agent) if agent else None
@@ -378,14 +378,24 @@ class Orchestrator:
                     on_output=on_output,
                 )
 
+                logger.info(
+                    f"Issue #{issue.number}: Commit retry completed. "
+                    f"Success={commit_result.success}, exit_code={commit_result.exit_code}, "
+                    f"duration={commit_result.duration_seconds:.1f}s"
+                )
+                if not commit_result.success:
+                    logger.warning(
+                        f"Issue #{issue.number}: Commit retry output: {commit_result.output[:500]}"
+                    )
+
                 # Check again if there are still uncommitted changes
                 still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
                 if still_uncommitted:
                     # Still uncommitted after retry - this is a fatal error
                     final_status = await self.worktrees.get_uncommitted_status(worktree.path)
                     logger.error(
-                        f"Issue #{issue.number}: Still has uncommitted changes after retry!\n"
-                        f"Uncommitted changes:\n{final_status}"
+                        f"Issue #{issue.number}: Still has uncommitted changes after retry! "
+                        f"Files:\n{final_status}"
                     )
                     worktree = None  # Prevent cleanup so user can inspect
                     raise ClaudeRunnerError(
@@ -671,7 +681,7 @@ class Orchestrator:
                 uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
                 logger.warning(
                     f"PR #{pr.number}: Claude left uncommitted changes, "
-                    f"retrying with commit instructions"
+                    f"retrying with commit instructions. Files:\n{uncommitted_status}"
                 )
 
                 on_output = self.display.get_output_callback(agent) if agent else None
@@ -682,14 +692,24 @@ class Orchestrator:
                     on_output=on_output,
                 )
 
+                logger.info(
+                    f"PR #{pr.number}: Commit retry completed. "
+                    f"Success={commit_result.success}, exit_code={commit_result.exit_code}, "
+                    f"duration={commit_result.duration_seconds:.1f}s"
+                )
+                if not commit_result.success:
+                    logger.warning(
+                        f"PR #{pr.number}: Commit retry output: {commit_result.output[:500]}"
+                    )
+
                 # Check again if there are still uncommitted changes
                 still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
                 if still_uncommitted:
                     # Still uncommitted after retry - this is a fatal error
                     final_status = await self.worktrees.get_uncommitted_status(worktree.path)
                     logger.error(
-                        f"PR #{pr.number}: Still has uncommitted changes after retry!\n"
-                        f"Uncommitted changes:\n{final_status}"
+                        f"PR #{pr.number}: Still has uncommitted changes after retry! "
+                        f"Files:\n{final_status}"
                     )
                     worktree = None  # Prevent cleanup so user can inspect
                     raise ClaudeRunnerError(
