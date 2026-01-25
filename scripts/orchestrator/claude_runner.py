@@ -123,11 +123,13 @@ class ClaudeRunner:
         if system_prompt_file and system_prompt_file.exists():
             cmd.extend(["--append-system-prompt", str(system_prompt_file)])
 
-        # Add the prompt
-        cmd.append(prompt)
+        # Pass prompt via stdin to avoid shell escaping issues with multi-line prompts
+        use_stdin = "\n" in prompt or "`" in prompt or len(prompt) > 1000
+        if not use_stdin:
+            cmd.append(prompt)
 
         logger.info(f"Running Claude in {cwd}")
-        logger.debug(f"Command: {' '.join(cmd)}")
+        logger.debug(f"Command: {' '.join(cmd)}, use_stdin={use_stdin}")
 
         try:
             import time
@@ -136,12 +138,20 @@ class ClaudeRunner:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,
+                stdin=asyncio.subprocess.PIPE if use_stdin else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 # Increase buffer limit to 10MB to handle large stream-json lines
                 # (default is 64KB which fails on large tool outputs)
                 limit=10 * 1024 * 1024,
             )
+
+            # Send prompt via stdin if needed
+            if use_stdin:
+                proc.stdin.write(prompt.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
 
             # Signal that Claude is starting
             if on_output:
