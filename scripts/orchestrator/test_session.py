@@ -112,15 +112,23 @@ class TestSessionManager:
         _, output, _ = await self._run_git("status", "--porcelain")
         return bool(output.strip())
 
-    async def _has_unpushed_commits(self) -> tuple[bool, int]:
+    async def _has_unpushed_commits(self, branch_name: str) -> tuple[bool, int]:
         """Check for commits ahead of remote.
+
+        Args:
+            branch_name: The branch to check against origin.
 
         Returns:
             Tuple of (has_unpushed, count).
         """
-        _, output, _ = await self._run_git(
-            "rev-list", "@{upstream}..HEAD", "--count"
+        # Use explicit origin/branch instead of @{upstream} which may not be set
+        returncode, output, _ = await self._run_git(
+            "rev-list", f"origin/{branch_name}..HEAD", "--count"
         )
+        if returncode != 0:
+            # Branch might not exist on remote yet, or fetch needed
+            logger.debug(f"rev-list failed for origin/{branch_name}, assuming no unpushed")
+            return False, 0
         try:
             count = int(output.strip())
             return count > 0, count
@@ -312,7 +320,7 @@ class TestSessionManager:
         otherwise returns to original branch and clears state.
         """
         has_uncommitted = await self._has_uncommitted_changes()
-        has_unpushed, unpushed_count = await self._has_unpushed_commits()
+        has_unpushed, unpushed_count = await self._has_unpushed_commits(state.branch_name)
 
         if has_uncommitted:
             _, status_output, _ = await self._run_git("status", "--short")
