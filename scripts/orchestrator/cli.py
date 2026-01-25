@@ -634,15 +634,18 @@ def main() -> int:
         help="Overwrite existing clover.yaml",
     )
 
-    # Test command - simplified: clover test <target> or clover test resume
+    # Test command - simplified: clover test <target> or clover test --resume
     test_parser = subparsers.add_parser("test", help="Test a PR or branch locally")
     test_parser.add_argument(
         "target",
         nargs="?",
         help="PR number (184, #184) or branch name",
     )
-    test_subparsers = test_parser.add_subparsers(dest="test_command")
-    test_subparsers.add_parser("resume", help="Resume previous Claude session")
+    test_parser.add_argument(
+        "--resume", "-r",
+        action="store_true",
+        help="Resume previous Claude session",
+    )
 
     args = parser.parse_args()
 
@@ -665,8 +668,7 @@ def main() -> int:
     elif args.command == "init":
         return cmd_init(args)
     elif args.command == "test":
-        # Handle test subcommands
-        if args.test_command == "resume":
+        if args.resume:
             return cmd_test_resume(args)
         elif args.target:
             return cmd_test(args)
