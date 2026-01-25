@@ -359,30 +359,47 @@ class Orchestrator:
             if not result.success:
                 raise ClaudeRunnerError(f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}")
 
+            # Check if there are uncommitted changes (Claude made changes but didn't commit)
+            has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+
+            if has_uncommitted:
+                # Claude made changes but didn't commit them - retry with commit instructions
+                uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
+                logger.warning(
+                    f"Issue #{issue.number}: Claude left uncommitted changes, "
+                    f"retrying with commit instructions"
+                )
+
+                on_output = self.display.get_output_callback(agent) if agent else None
+                commit_result = await self.claude.commit_uncommitted_changes(
+                    uncommitted_status=uncommitted_status,
+                    context=f"issue #{issue.number}: {issue.title}",
+                    cwd=worktree.path,
+                    on_output=on_output,
+                )
+
+                # Check again if there are still uncommitted changes
+                still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                if still_uncommitted:
+                    # Still uncommitted after retry - this is a fatal error
+                    final_status = await self.worktrees.get_uncommitted_status(worktree.path)
+                    logger.error(
+                        f"Issue #{issue.number}: Still has uncommitted changes after retry!\n"
+                        f"Uncommitted changes:\n{final_status}"
+                    )
+                    worktree = None  # Prevent cleanup so user can inspect
+                    raise ClaudeRunnerError(
+                        f"Claude failed to commit changes after retry. "
+                        f"Worktree preserved for inspection. "
+                        f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
+                    )
+
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
                 worktree.path, self._default_branch
             )
 
             if not has_commits:
-                # Check if there are uncommitted changes (Claude made changes but didn't commit)
-                has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-
-                if has_uncommitted:
-                    # Claude made changes but didn't commit them - this is an error
-                    uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
-                    logger.error(
-                        f"Issue #{issue.number}: Claude made changes but didn't commit them!\n"
-                        f"Uncommitted changes:\n{uncommitted_status}"
-                    )
-                    # Don't clean up the worktree so user can inspect/recover
-                    worktree = None  # Prevent cleanup in finally block
-                    raise ClaudeRunnerError(
-                        f"Claude made file changes but didn't commit them. "
-                        f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{uncommitted_status[:GITHUB_COMMENT_MAX_BODY]}"
-                    )
-
                 logger.info(f"No commits made for issue #{issue.number}, nothing to push")
                 await self.github.post_comment(
                     issue.number,
@@ -396,10 +413,24 @@ class Orchestrator:
                 self.state.mark_completed(WorkItemType.ISSUE, issue.number)
                 return
 
+            # Rebase on base branch if needed to avoid conflicts
+            is_behind = await self.worktrees.is_behind_base(
+                worktree.path, self._default_branch
+            )
+            if is_behind:
+                logger.info(f"Branch is behind {self._default_branch}, rebasing...")
+                success, error_msg = await self.worktrees.rebase_on_base(
+                    worktree.path, self._default_branch
+                )
+                if not success:
+                    raise ClaudeRunnerError(
+                        f"Failed to rebase on {self._default_branch}: {error_msg}"
+                    )
+
             # Push branch
             await self.worktrees.push_branch(worktree.path, branch_name)
 
-            # Create PR
+            # Create PR (GitHub body limit is 65536 chars)
             pr_body = f"""Implements #{issue.number}
 
 ## Changes
@@ -625,42 +656,70 @@ class Orchestrator:
                     f"Review implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}"
                 )
 
+            # Check if there are uncommitted changes (Claude made changes but didn't commit)
+            has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+
+            if has_uncommitted:
+                # Claude made changes but didn't commit them - retry with commit instructions
+                uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
+                logger.warning(
+                    f"PR #{pr.number}: Claude left uncommitted changes, "
+                    f"retrying with commit instructions"
+                )
+
+                on_output = self.display.get_output_callback(agent) if agent else None
+                commit_result = await self.claude.commit_uncommitted_changes(
+                    uncommitted_status=uncommitted_status,
+                    context=f"PR #{pr.number} review fixes: {pr.title}",
+                    cwd=worktree.path,
+                    on_output=on_output,
+                )
+
+                # Check again if there are still uncommitted changes
+                still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                if still_uncommitted:
+                    # Still uncommitted after retry - this is a fatal error
+                    final_status = await self.worktrees.get_uncommitted_status(worktree.path)
+                    logger.error(
+                        f"PR #{pr.number}: Still has uncommitted changes after retry!\n"
+                        f"Uncommitted changes:\n{final_status}"
+                    )
+                    worktree = None  # Prevent cleanup so user can inspect
+                    raise ClaudeRunnerError(
+                        f"Claude failed to commit changes after retry. "
+                        f"Worktree preserved for inspection. "
+                        f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
+                    )
+
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
                 worktree.path, f"origin/{pr.branch}"
             )
 
             if not has_commits:
-                # Check if there are uncommitted changes
-                has_uncommitted = await self.worktrees.has_uncommitted_changes(
-                    worktree.path
-                )
-
-                if has_uncommitted:
-                    # Claude made changes but didn't commit them
-                    uncommitted_status = await self.worktrees.get_uncommitted_status(
-                        worktree.path
-                    )
-                    logger.error(
-                        f"PR #{pr.number}: Claude made changes but didn't commit them!\n"
-                        f"Uncommitted changes:\n{uncommitted_status}"
-                    )
-                    worktree = None  # Prevent cleanup in finally block
-                    raise ClaudeRunnerError(
-                        f"Claude made file changes but didn't commit them. "
-                        f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{uncommitted_status[:GITHUB_COMMENT_MAX_BODY]}"
-                    )
-
                 # No changes made
                 logger.info(f"No commits made for PR #{pr.number}, nothing to push")
                 await self.github.post_comment(
                     pr.number,
-                    f"I reviewed the suggestions but didn't find any changes to make.\n\n"
-                    f"Claude's response:\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                    f"I reviewed the suggestions and determined no code changes were needed.\n\n"
+                    f"**Details:**\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
             else:
+                # Rebase on base branch if needed to avoid conflicts
+                is_behind = await self.worktrees.is_behind_base(
+                    worktree.path, self._default_branch
+                )
+                if is_behind:
+                    logger.info(f"Branch is behind {self._default_branch}, rebasing...")
+                    success, error_msg = await self.worktrees.rebase_on_base(
+                        worktree.path, self._default_branch
+                    )
+                    if not success:
+                        raise ClaudeRunnerError(
+                            f"Failed to rebase on {self._default_branch}: {error_msg}"
+                        )
+
                 # Push commits to the existing PR branch
                 await self.worktrees.push_branch(worktree.path, pr.branch)
 

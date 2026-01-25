@@ -534,3 +534,84 @@ class WorktreeManager:
 
         # Default to main
         return "main"
+
+    async def has_conflicts_with_base(
+        self, worktree_path: Path, base_branch: str
+    ) -> bool:
+        """Check if the current branch would have merge conflicts with base.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to check against.
+
+        Returns:
+            True if there would be merge conflicts.
+        """
+        # Fetch latest base branch
+        await self._run_git("fetch", "origin", base_branch, cwd=worktree_path, check=False)
+
+        # Try a dry-run merge to detect conflicts
+        returncode, _, _ = await self._run_git(
+            "merge", "--no-commit", "--no-ff", f"origin/{base_branch}",
+            cwd=worktree_path, check=False
+        )
+
+        # Abort the merge attempt
+        await self._run_git("merge", "--abort", cwd=worktree_path, check=False)
+
+        return returncode != 0
+
+    async def rebase_on_base(
+        self, worktree_path: Path, base_branch: str
+    ) -> tuple[bool, str]:
+        """Rebase the current branch on the base branch.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to rebase onto.
+
+        Returns:
+            Tuple of (success, error_message). error_message is empty on success.
+        """
+        # Fetch latest base branch
+        await self._run_git("fetch", "origin", base_branch, cwd=worktree_path, check=False)
+
+        # Attempt rebase
+        returncode, stdout, stderr = await self._run_git(
+            "rebase", f"origin/{base_branch}",
+            cwd=worktree_path, check=False
+        )
+
+        if returncode == 0:
+            logger.info(f"Successfully rebased on origin/{base_branch}")
+            return True, ""
+
+        # Rebase failed - abort and return error
+        await self._run_git("rebase", "--abort", cwd=worktree_path, check=False)
+        error_msg = stderr or stdout or "Rebase failed with conflicts"
+        logger.warning(f"Rebase failed: {error_msg}")
+        return False, error_msg
+
+    async def is_behind_base(self, worktree_path: Path, base_branch: str) -> bool:
+        """Check if the current branch is behind the base branch.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to compare against.
+
+        Returns:
+            True if the current branch is behind (base has commits not in this branch).
+        """
+        # Fetch latest
+        await self._run_git("fetch", "origin", base_branch, cwd=worktree_path, check=False)
+
+        # Count commits in base that aren't in HEAD
+        _, output, _ = await self._run_git(
+            "rev-list", f"HEAD..origin/{base_branch}", "--count",
+            cwd=worktree_path, check=False
+        )
+        try:
+            count = int(output.strip())
+            return count > 0
+        except ValueError:
+            return False

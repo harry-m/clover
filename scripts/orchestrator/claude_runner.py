@@ -561,9 +561,12 @@ Instructions:
 1. Read the review feedback carefully
 2. Address each suggestion, prioritizing blocking issues first
 3. Make focused changes that address the specific feedback
-4. IMPORTANT: You MUST commit your changes using git. Run `git add` and `git commit` with a clear message. Uncommitted changes will be lost!
+4. If you make any changes, you MUST commit them using git. Run `git add` and `git commit` with a clear message. Uncommitted changes will be lost!
+5. If the review has no actionable suggestions (e.g., only positive feedback or suggestions already addressed), explicitly state that no changes were needed.
 
-When done, provide a summary of what you implemented and which suggestions were addressed.
+When done, provide a summary. Be clear about whether you made changes or not:
+- If you made changes: describe what you changed and which suggestions were addressed
+- If no changes were needed: explain why (e.g., "The review only contained positive feedback" or "The suggested changes were already implemented")
 """
 
         system_prompt_file = self.config.prompts_dir / "implement_review.md"
@@ -573,4 +576,56 @@ When done, provide a summary of what you implemented and which suggestions were 
             cwd=cwd,
             system_prompt_file=system_prompt_file,
             on_output=on_output,
+        )
+
+    async def commit_uncommitted_changes(
+        self,
+        uncommitted_status: str,
+        context: str,
+        cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+    ) -> ClaudeResult:
+        """Run Claude to examine and commit uncommitted changes.
+
+        This is used when a previous Claude run left uncommitted changes.
+
+        Args:
+            uncommitted_status: Output from git status showing the uncommitted files.
+            context: Description of what was being worked on (e.g., "issue #123" or "PR #456 review fixes").
+            cwd: Worktree path with the uncommitted changes.
+            on_output: Optional callback for output lines.
+
+        Returns:
+            ClaudeResult.
+        """
+        prompt = f"""You left uncommitted changes in the worktree. Please examine them and commit.
+
+## Context
+
+You were working on: {context}
+
+## Uncommitted Changes
+
+```
+{uncommitted_status}
+```
+
+---
+
+Instructions:
+1. Use `git diff` and `git diff --staged` to examine what changes were made
+2. Determine if these changes are complete and correct
+3. If the changes look good, commit them with a clear commit message
+4. If the changes are incomplete or broken, fix them first, then commit
+5. You MUST commit something - do not leave uncommitted changes
+
+Use `git add` to stage files and `git commit` to commit them.
+"""
+
+        return await self.run(
+            prompt=prompt,
+            cwd=cwd,
+            on_output=on_output,
+            # Only give git-related tools for this focused task
+            allowed_tools=["Bash", "Read", "Edit", "Glob", "Grep"],
         )
