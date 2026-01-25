@@ -262,6 +262,67 @@ class WorktreeManager:
 
             return Worktree(path=worktree_path, branch=branch_name, commit=commit)
 
+    async def checkout_pr_branch_writable(
+        self, pr_number: int, branch_name: str
+    ) -> Worktree:
+        """Create a worktree with a local tracking branch that can receive commits.
+
+        Unlike checkout_pr_branch which creates a detached HEAD, this creates
+        a proper local branch that tracks the remote branch, allowing commits
+        to be made and pushed.
+
+        Args:
+            pr_number: PR number (for naming the worktree).
+            branch_name: The PR's branch name.
+
+        Returns:
+            Worktree instance with a writable local branch.
+        """
+        # Serialize worktree operations to avoid git config lock contention
+        async with self._worktree_lock:
+            worktree_name = f"pr-fix-{pr_number}"
+            safe_name = worktree_name.replace("/", "-")
+            worktree_path = self.worktree_base / safe_name
+
+            # Ensure base directory exists
+            self.worktree_base.mkdir(parents=True, exist_ok=True)
+
+            # Check if worktree already exists
+            if worktree_path.exists():
+                logger.warning(f"Worktree already exists at {worktree_path}, removing")
+                await self.cleanup_worktree(worktree_path)
+
+            # Fetch the PR branch
+            await self._run_git("fetch", "origin", branch_name)
+
+            # Create worktree with a local tracking branch
+            # First create the worktree at the remote branch
+            await self._run_git(
+                "worktree",
+                "add",
+                str(worktree_path),
+                f"origin/{branch_name}",
+            )
+
+            # Create a local tracking branch in the worktree
+            await self._run_git(
+                "checkout",
+                "-B",
+                branch_name,
+                f"origin/{branch_name}",
+                cwd=worktree_path,
+            )
+
+            # Get the current commit
+            _, commit, _ = await self._run_git("rev-parse", "HEAD", cwd=worktree_path)
+
+            logger.info(
+                f"Created writable worktree for PR #{pr_number} at {worktree_path} "
+                f"on branch {branch_name}"
+            )
+
+            return Worktree(path=worktree_path, branch=branch_name, commit=commit)
+
     async def cleanup_worktree(self, worktree_path: Path) -> None:
         """Remove a worktree and clean up.
 

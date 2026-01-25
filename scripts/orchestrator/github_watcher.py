@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # GitHub API base URL
 GITHUB_API_URL = "https://api.github.com"
 
+# Header that identifies Clover's review comments
+REVIEW_COMMENT_HEADER = "## 🤖 Automated Code Review"
+
 
 @dataclass
 class Issue:
@@ -324,6 +327,25 @@ class GitHubWatcher:
         except GitHubError as e:
             logger.error(f"Failed to get PR #{pr_number} comments: {e}")
             return []
+
+    async def get_clover_review_comment(self, pr_number: int) -> Optional[Comment]:
+        """Get Clover's most recent review comment from a PR.
+
+        Args:
+            pr_number: PR number.
+
+        Returns:
+            Most recent review comment from Clover, or None if not found.
+        """
+        comments = await self.get_pr_comments(pr_number)
+        review_comments = [
+            c for c in comments
+            if c.body.strip().startswith(REVIEW_COMMENT_HEADER)
+        ]
+        if not review_comments:
+            return None
+        # Return the most recent review comment
+        return max(review_comments, key=lambda c: c.created_at)
 
     async def get_pr_reviews(self, pr_number: int) -> list[dict]:
         """Get reviews on a pull request.

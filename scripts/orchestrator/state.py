@@ -22,6 +22,7 @@ class WorkItemType(str, Enum):
 
     ISSUE = "issue"
     PR_REVIEW = "pr_review"
+    PR_FIX = "pr_fix"
     PR_MERGE = "pr_merge"
 
 

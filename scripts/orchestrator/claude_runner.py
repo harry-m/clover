@@ -520,3 +520,57 @@ Format your review as markdown with sections for:
             # Review doesn't need write access
             allowed_tools=["Bash", "Read", "Glob", "Grep"],
         )
+
+    async def implement_review(
+        self,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+        review_comment: str,
+        cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+    ) -> ClaudeResult:
+        """Run Claude to implement review suggestions for a PR.
+
+        Args:
+            pr_number: GitHub PR number.
+            pr_title: PR title.
+            pr_body: PR body/description.
+            review_comment: The review feedback to implement.
+            cwd: Worktree path with PR code.
+            on_output: Optional callback for output lines.
+
+        Returns:
+            ClaudeResult.
+        """
+        prompt = f"""Implement the review suggestions for this pull request:
+
+# PR #{pr_number}: {pr_title}
+
+## PR Description
+
+{pr_body}
+
+## Review Feedback to Implement
+
+{review_comment}
+
+---
+
+Instructions:
+1. Read the review feedback carefully
+2. Address each suggestion, prioritizing blocking issues first
+3. Make focused changes that address the specific feedback
+4. IMPORTANT: You MUST commit your changes using git. Run `git add` and `git commit` with a clear message. Uncommitted changes will be lost!
+
+When done, provide a summary of what you implemented and which suggestions were addressed.
+"""
+
+        system_prompt_file = self.config.prompts_dir / "implement_review.md"
+
+        return await self.run(
+            prompt=prompt,
+            cwd=cwd,
+            system_prompt_file=system_prompt_file,
+            on_output=on_output,
+        )

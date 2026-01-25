@@ -214,6 +214,21 @@ class Orchestrator:
                 task.add_done_callback(self._active_tasks.discard)
                 available_slots -= 1
 
+        # Check for PRs needing fix implementation (have clover-fix and clover-reviewed)
+        for pr in prs:
+            if available_slots <= 0:
+                break
+
+            if not self._should_fix_pr(pr):
+                continue
+
+            if not self.state.is_processing(WorkItemType.PR_FIX, pr.number):
+                self._log(f"Found PR #{pr.number} for fix: {pr.title}")
+                task = asyncio.create_task(self._process_pr_fix(pr))
+                self._active_tasks.add(task)
+                task.add_done_callback(self._active_tasks.discard)
+                available_slots -= 1
+
     def _should_review_pr(self, pr: PullRequest) -> bool:
         """Check if Clover should review this PR.
 
@@ -224,6 +239,26 @@ class Orchestrator:
             True if PR has the clover label.
         """
         return self.config.clover_label in pr.labels
+
+    def _should_fix_pr(self, pr: PullRequest) -> bool:
+        """Check if PR needs fix implementation.
+
+        Args:
+            pr: Pull request to check.
+
+        Returns:
+            True if PR has clover-fix label and has been reviewed.
+        """
+        has_fix_label = "clover-fix" in pr.labels
+        has_reviewed_label = "clover-reviewed" in pr.labels
+
+        if has_fix_label and not has_reviewed_label:
+            logger.warning(
+                f"PR #{pr.number} has clover-fix label but hasn't been reviewed yet"
+            )
+            return False
+
+        return has_fix_label and has_reviewed_label
 
     async def _process_issue(self, issue: Issue) -> None:
         """Process an issue by implementing it.
@@ -501,6 +536,155 @@ class Orchestrator:
             if agent:
                 agent.mark_failed()
                 agent.add_output(f"Error: {str(e)[:100]}")
+
+        finally:
+            # Cleanup worktree
+            if worktree:
+                try:
+                    await self.worktrees.cleanup_worktree(worktree.path)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup worktree: {e}")
+            # Refresh display
+            if self.display:
+                self.display.refresh()
+
+    async def _process_pr_fix(self, pr: PullRequest) -> None:
+        """Implement review suggestions for a PR.
+
+        Args:
+            pr: PR to fix.
+        """
+        worktree = None
+        agent: Optional[AgentContext] = None
+
+        # Create agent for TUI tracking
+        if self.display:
+            agent = self.display.create_agent(
+                work_type="pr_fix",
+                number=pr.number,
+                title=pr.title,
+                branch_name=pr.branch,
+            )
+
+        try:
+            # Get Clover's review comment
+            review_comment = await self.github.get_clover_review_comment(pr.number)
+            if not review_comment:
+                raise ClaudeRunnerError(
+                    f"No review comment found for PR #{pr.number}. "
+                    "Cannot implement fixes without review feedback."
+                )
+
+            # Mark as in progress
+            self.state.mark_in_progress(WorkItemType.PR_FIX, pr.number)
+
+            # Post start comment
+            await self.github.post_comment(
+                pr.number,
+                "🔧 Implementing review suggestions...\n\n"
+                "*— Clover, the Claude Overseer*",
+            )
+
+            # Create writable worktree at PR branch
+            worktree = await self.worktrees.checkout_pr_branch_writable(
+                pr.number, pr.branch
+            )
+
+            # Run setup script if configured
+            await self._run_setup_script(
+                worktree.path, pr.branch, "pr_fix", pr.number
+            )
+
+            # Run Claude to implement review suggestions
+            on_output = self.display.get_output_callback(agent) if agent else None
+            result = await self.claude.implement_review(
+                pr_number=pr.number,
+                pr_title=pr.title,
+                pr_body=pr.body,
+                review_comment=review_comment.body,
+                cwd=worktree.path,
+                on_output=on_output,
+            )
+
+            if not result.success:
+                raise ClaudeRunnerError(
+                    f"Review implementation failed: {result.output[:500]}"
+                )
+
+            # Check if there are any commits to push
+            has_commits = await self.worktrees.has_commits_ahead(
+                worktree.path, f"origin/{pr.branch}"
+            )
+
+            if not has_commits:
+                # Check if there are uncommitted changes
+                has_uncommitted = await self.worktrees.has_uncommitted_changes(
+                    worktree.path
+                )
+
+                if has_uncommitted:
+                    # Claude made changes but didn't commit them
+                    uncommitted_status = await self.worktrees.get_uncommitted_status(
+                        worktree.path
+                    )
+                    logger.error(
+                        f"PR #{pr.number}: Claude made changes but didn't commit them!\n"
+                        f"Uncommitted changes:\n{uncommitted_status}"
+                    )
+                    worktree = None  # Prevent cleanup in finally block
+                    raise ClaudeRunnerError(
+                        f"Claude made file changes but didn't commit them. "
+                        f"Worktree preserved for inspection. "
+                        f"Uncommitted files:\n{uncommitted_status[:500]}"
+                    )
+
+                # No changes made
+                logger.info(f"No commits made for PR #{pr.number}, nothing to push")
+                await self.github.post_comment(
+                    pr.number,
+                    f"I reviewed the suggestions but didn't find any changes to make.\n\n"
+                    f"Claude's response:\n\n{result.output[:1000]}\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+            else:
+                # Push commits to the existing PR branch
+                await self.worktrees.push_branch(worktree.path, pr.branch)
+
+                # Post completion comment
+                await self.github.post_comment(
+                    pr.number,
+                    f"✅ Implemented review suggestions and pushed changes.\n\n"
+                    f"**Summary:** {result.output[:1500]}\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+
+            # Update labels: remove clover-fix, add clover-fixed
+            await self.github.remove_label(pr.number, "clover-fix")
+            await self.github.add_label(pr.number, "clover-fixed")
+
+            # Mark completed
+            self.state.mark_completed(WorkItemType.PR_FIX, pr.number)
+            self._log(f"Implemented review fixes for PR #{pr.number}")
+            if agent:
+                agent.mark_completed()
+
+        except Exception as e:
+            logger.error(f"Failed to implement fixes for PR #{pr.number}: {e}")
+            self.state.mark_failed(WorkItemType.PR_FIX, pr.number, str(e))
+            if agent:
+                agent.mark_failed()
+                agent.add_output(f"Error: {str(e)[:100]}")
+
+            # Post error comment on PR
+            try:
+                await self.github.post_comment(
+                    pr.number,
+                    f"❌ Failed to implement review suggestions.\n\n"
+                    f"Error: {str(e)[:500]}\n\n"
+                    f"*— Clover, the Claude Overseer*",
+                )
+            except Exception:
+                pass
 
         finally:
             # Cleanup worktree
