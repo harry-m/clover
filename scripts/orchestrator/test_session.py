@@ -358,3 +358,17 @@ class TestSessionManager:
 
         await self._launch_claude(state, resume=True)
         await self._post_exit_checks(state)
+
+    async def clear(self) -> None:
+        """Clear test session state.
+
+        Use this to manually clear a stuck test session.
+        """
+        state = self._load_state()
+        if not state:
+            print("No active test session to clear.")
+            return
+
+        print(f"Clearing test session for {'PR #' + str(state.pr_number) if state.pr_number else state.branch_name}")
+        self._save_state(None)
+        print("✓ Test session cleared. You can now start a new test.")

@@ -557,6 +557,19 @@ def cmd_test_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test_clear(args: argparse.Namespace) -> int:
+    """Clear test session state."""
+    try:
+        config = load_config(get_repo_path(args))
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return 1
+
+    manager = TestSessionManager(config)
+    _run_async(manager.clear())
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -670,6 +683,8 @@ def main() -> int:
     elif args.command == "test":
         if args.resume or args.target == "resume":
             return cmd_test_resume(args)
+        elif args.target == "clear":
+            return cmd_test_clear(args)
         elif args.target:
             return cmd_test(args)
         else:
