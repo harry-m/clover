@@ -220,16 +220,27 @@ class CloverDisplay:
         Returns:
             The rendered layout.
         """
-        layout = Layout()
+        try:
+            layout = Layout()
 
-        # Main vertical split - pass renderables directly
-        layout.split_column(
-            Layout(self._render_header(), name="header", size=3),
-            Layout(self._render_system_log(), name="log", size=12),
-            Layout(self._render_agents(), name="agents"),
-        )
+            # Main vertical split - pass renderables directly
+            layout.split_column(
+                Layout(self._render_header(), name="header", size=3),
+                Layout(self._render_system_log(), name="log", size=12),
+                Layout(self._render_agents(), name="agents"),
+            )
 
-        return layout
+            return layout
+        except Exception as e:
+            # If rendering fails, show error in a simple layout
+            import logging
+            logging.getLogger(__name__).error(f"TUI render error: {e}", exc_info=True)
+            error_layout = Layout()
+            error_text = Text(f"Render error: {e}", style="bold red")
+            error_layout.split_column(
+                Layout(Panel(error_text, title="Error", border_style="red"), name="error"),
+            )
+            return error_layout
 
     def refresh(self) -> None:
         """Refresh the display immediately.
@@ -242,13 +253,23 @@ class CloverDisplay:
 
     def start(self) -> None:
         """Start the live display."""
-        self._live = Live(
-            self.render,  # Pass the method, not the result, so it's re-called on each refresh
-            console=self.console,
-            refresh_per_second=10,
-            screen=True,
-        )
-        self._live.start()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("TUI: Creating Live display...")
+        try:
+            self._live = Live(
+                self.render,  # Pass the method, not the result, so it's re-called on each refresh
+                console=self.console,
+                refresh_per_second=10,
+                screen=True,
+            )
+            logger.info("TUI: Starting Live display...")
+            self._live.start()
+            logger.info("TUI: Live display started successfully")
+        except Exception as e:
+            logger.error(f"TUI: Failed to start: {e}", exc_info=True)
+            self._live = None
+            raise
 
     def stop(self) -> None:
         """Stop the live display."""

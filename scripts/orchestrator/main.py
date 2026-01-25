@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -19,13 +20,22 @@ from .state import State, WorkItemType
 from .tui import CloverDisplay, is_tty
 from .worktree_manager import WorktreeManager
 
-# Configure logging
+# Configure logging - log to both console and file
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Add file handler so errors are preserved even when TUI clears the terminal
+_log_file = Path.home() / ".clover" / "clover.log"
+_log_file.parent.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.FileHandler(_log_file, mode="a")
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logging.getLogger().addHandler(_file_handler)
 
 
 class Orchestrator:
@@ -724,17 +734,24 @@ async def async_main(args: argparse.Namespace) -> int:
     # Determine if TUI should be enabled
     use_tui = False
     if hasattr(args, "no_tui") and args.no_tui:
+        logger.info("TUI disabled via --no-tui flag")
         use_tui = False
     elif hasattr(args, "tui") and args.tui:
+        logger.info("TUI enabled via --tui flag")
         use_tui = True
     elif is_tty() and not getattr(args, "once", False):
         # Auto-enable TUI for interactive sessions (but not --once mode)
+        logger.info("TUI auto-enabled (interactive TTY session)")
         use_tui = True
+    else:
+        logger.info(f"TUI disabled (is_tty={is_tty()}, once={getattr(args, 'once', False)})")
 
     # Create display if TUI is enabled
     display: Optional[CloverDisplay] = None
     if use_tui:
+        logger.info("Creating TUI display...")
         display = CloverDisplay(config)
+        logger.info("TUI display created")
 
     # Create orchestrator
     orchestrator = Orchestrator(config, display=display)
@@ -753,6 +770,7 @@ async def async_main(args: argparse.Namespace) -> int:
             pass
 
     # Run
+    error_to_display = None
     try:
         # Start TUI display if enabled
         if display:
@@ -776,9 +794,20 @@ async def async_main(args: argparse.Namespace) -> int:
             await orchestrator._cleanup()
         else:
             await orchestrator.start()
+    except Exception as e:
+        # Capture error to display after TUI stops
+        error_to_display = e
+        logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
         # Stop TUI display
         if display:
             display.stop()
+
+    # Display error after TUI is stopped so user can see it
+    if error_to_display:
+        import traceback
+        print(f"\n\033[91mError:\033[0m {error_to_display}", file=sys.stderr)
+        print(f"\nFull traceback logged to: {_log_file}", file=sys.stderr)
+        return 1
 
     return 0
