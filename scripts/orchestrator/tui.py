@@ -31,7 +31,7 @@ class CloverDisplay:
         self.config = config
         self.registry = AgentRegistry()
         self.system_log: deque[str] = deque(maxlen=10)
-        self.console = Console()
+        self.console = Console(force_terminal=True)
         self._live: Live | None = None
 
     def log(self, message: str) -> None:
@@ -258,10 +258,10 @@ class CloverDisplay:
         logger.info("TUI: Creating Live display...")
         try:
             self._live = Live(
-                self.render,  # Pass the method, not the result, so it's re-called on each refresh
                 console=self.console,
                 refresh_per_second=10,
                 screen=True,
+                get_renderable=self.render,
             )
             logger.info("TUI: Starting Live display...")
             self._live.start()
