@@ -489,10 +489,17 @@ class Orchestrator:
                 pass
 
         finally:
-            # Cleanup worktree
+            # Cleanup worktree (but preserve if there are uncommitted changes)
             if worktree:
                 try:
-                    await self.worktrees.cleanup_worktree(worktree.path)
+                    has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                    if has_uncommitted:
+                        logger.warning(
+                            f"Preserving worktree at {worktree.path} for inspection "
+                            f"(has uncommitted changes)"
+                        )
+                    else:
+                        await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
             # Refresh display
@@ -760,10 +767,17 @@ class Orchestrator:
                 pass
 
         finally:
-            # Cleanup worktree
+            # Cleanup worktree (but preserve if there are uncommitted changes)
             if worktree:
                 try:
-                    await self.worktrees.cleanup_worktree(worktree.path)
+                    has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                    if has_uncommitted:
+                        logger.warning(
+                            f"Preserving worktree at {worktree.path} for inspection "
+                            f"(has uncommitted changes)"
+                        )
+                    else:
+                        await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
             # Refresh display

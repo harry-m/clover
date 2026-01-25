@@ -668,7 +668,7 @@ def main() -> int:
     elif args.command == "init":
         return cmd_init(args)
     elif args.command == "test":
-        if args.resume:
+        if args.resume or args.target == "resume":
             return cmd_test_resume(args)
         elif args.target:
             return cmd_test(args)
