@@ -20,6 +20,10 @@ from .state import State, WorkItemType
 from .tui import CloverDisplay, is_tty
 from .worktree_manager import WorktreeManager
 
+# GitHub API limits - comments can be up to 65,536 characters
+# We use 64,000 to leave room for headers/footers added around dynamic content
+GITHUB_COMMENT_MAX_BODY = 64000
+
 # Configure logging - log to both console and file
 logging.basicConfig(
     level=logging.INFO,
@@ -353,7 +357,7 @@ class Orchestrator:
             )
 
             if not result.success:
-                raise ClaudeRunnerError(f"Implementation failed: {result.output[:500]}")
+                raise ClaudeRunnerError(f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}")
 
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
@@ -376,14 +380,14 @@ class Orchestrator:
                     raise ClaudeRunnerError(
                         f"Claude made file changes but didn't commit them. "
                         f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{uncommitted_status[:500]}"
+                        f"Uncommitted files:\n{uncommitted_status[:GITHUB_COMMENT_MAX_BODY]}"
                     )
 
                 logger.info(f"No commits made for issue #{issue.number}, nothing to push")
                 await self.github.post_comment(
                     issue.number,
                     f"I looked at this issue but didn't find any changes to make.\n\n"
-                    f"Claude's response:\n\n{result.output[:1000]}\n\n"
+                    f"Claude's response:\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
                 # Remove clover label and add clover-complete
@@ -400,7 +404,7 @@ class Orchestrator:
 
 ## Changes
 
-{result.output[:2000]}
+{result.output[:GITHUB_COMMENT_MAX_BODY]}
 
 ---
 *— Clover, the Claude Overseer*
@@ -424,7 +428,7 @@ class Orchestrator:
             await self.github.post_comment(
                 issue.number,
                 f"✅ Finished working on this issue.\n\n"
-                f"**Summary:** {result.output[:500]}\n\n"
+                f"**Summary:** {result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                 f"**Pull Request:** {pr_url}\n\n"
                 f"*— Clover, the Claude Overseer*",
             )
@@ -447,7 +451,7 @@ class Orchestrator:
                 await self.github.post_comment(
                     issue.number,
                     f"❌ Failed to implement this issue automatically.\n\n"
-                    f"Error: {str(e)[:500]}\n\n"
+                    f"Error: {str(e)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
             except Exception:
@@ -523,7 +527,7 @@ class Orchestrator:
             # Post review as comment
             review_comment = f"""## 🤖 Automated Code Review
 
-{checks_output}{result.output[:60000]}
+{checks_output}{result.output[:GITHUB_COMMENT_MAX_BODY]}
 
 ---
 *— Clover, the Claude Overseer*
@@ -618,7 +622,7 @@ class Orchestrator:
 
             if not result.success:
                 raise ClaudeRunnerError(
-                    f"Review implementation failed: {result.output[:500]}"
+                    f"Review implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}"
                 )
 
             # Check if there are any commits to push
@@ -645,7 +649,7 @@ class Orchestrator:
                     raise ClaudeRunnerError(
                         f"Claude made file changes but didn't commit them. "
                         f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{uncommitted_status[:500]}"
+                        f"Uncommitted files:\n{uncommitted_status[:GITHUB_COMMENT_MAX_BODY]}"
                     )
 
                 # No changes made
@@ -653,7 +657,7 @@ class Orchestrator:
                 await self.github.post_comment(
                     pr.number,
                     f"I reviewed the suggestions but didn't find any changes to make.\n\n"
-                    f"Claude's response:\n\n{result.output[:1000]}\n\n"
+                    f"Claude's response:\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
             else:
@@ -664,7 +668,7 @@ class Orchestrator:
                 await self.github.post_comment(
                     pr.number,
                     f"✅ Implemented review suggestions and pushed changes.\n\n"
-                    f"**Summary:** {result.output[:1500]}\n\n"
+                    f"**Summary:** {result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
 
@@ -690,7 +694,7 @@ class Orchestrator:
                 await self.github.post_comment(
                     pr.number,
                     f"❌ Failed to implement review suggestions.\n\n"
-                    f"Error: {str(e)[:500]}\n\n"
+                    f"Error: {str(e)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
             except Exception:
