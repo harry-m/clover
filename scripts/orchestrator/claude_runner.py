@@ -165,6 +165,8 @@ class ClaudeRunner:
             # Buffer for accumulating streaming text
             text_buffer = ""
             last_text_output_time = 0
+            # Track last assistant message for fallback if result is empty
+            last_assistant_text = ""
 
             async def read_stdout():
                 nonlocal first_response, text_buffer, last_text_output_time
@@ -258,6 +260,8 @@ class ClaudeRunner:
                                     if item.get("type") == "text":
                                         text = item.get("text", "")
                                         if text:
+                                            # Track for fallback if result is empty
+                                            last_assistant_text = text
                                             # Show first line or snippet
                                             first_line = text.split("\n")[0][:200]
                                             if first_line.strip():
@@ -330,7 +334,10 @@ class ClaudeRunner:
                     pass
 
             if not output:
-                output = stderr_str or "No output"
+                # Fallback to last assistant message if result was empty
+                output = last_assistant_text or stderr_str or "No output"
+                if last_assistant_text:
+                    logger.debug("Using last assistant message as output (result was empty)")
 
             success = proc.returncode == 0
 
