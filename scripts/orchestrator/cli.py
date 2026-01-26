@@ -519,9 +519,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         return 1
 
     # Parse target - strip leading # if present
-    target = args.target.lstrip("#") if args.target else None
+    target = args.targets[0].lstrip("#") if args.targets else None
     if not target:
-        print("Error: No target specified. Usage: clover test <PR-number-or-branch>")
+        print("Usage: clover test <PR-number-or-branch>")
+        print("       clover test list")
+        print("       clover test clean [target]")
         return 1
 
     manager = TestSessionManager(config)
@@ -538,8 +540,8 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_test_resume(args: argparse.Namespace) -> int:
-    """Resume previous Claude session."""
+def cmd_test_list(args: argparse.Namespace) -> int:
+    """List active test worktrees."""
     try:
         config = load_config(get_repo_path(args))
     except ValueError as e:
@@ -547,26 +549,23 @@ def cmd_test_resume(args: argparse.Namespace) -> int:
         return 1
 
     manager = TestSessionManager(config)
-
-    try:
-        _run_async(manager.resume())
-    except ValueError as e:
-        print(f"Error: {e}")
-        return 1
-
+    _run_async(manager.list())
     return 0
 
 
-def cmd_test_clear(args: argparse.Namespace) -> int:
-    """Clear test session state."""
+def cmd_test_clean(args: argparse.Namespace) -> int:
+    """Clean up test worktrees."""
     try:
         config = load_config(get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
 
+    # Optional target: clover test clean [42]
+    clean_target = args.targets[1].lstrip("#") if len(args.targets) > 1 else None
+
     manager = TestSessionManager(config)
-    _run_async(manager.clear())
+    _run_async(manager.clean(clean_target))
     return 0
 
 
@@ -647,17 +646,12 @@ def main() -> int:
         help="Overwrite existing clover.yaml",
     )
 
-    # Test command - simplified: clover test <target> or clover test --resume
+    # Test command: clover test <target>, clover test list, clover test clean [target]
     test_parser = subparsers.add_parser("test", help="Test a PR or branch locally")
     test_parser.add_argument(
-        "target",
-        nargs="?",
-        help="PR number (184, #184) or branch name",
-    )
-    test_parser.add_argument(
-        "--resume", "-r",
-        action="store_true",
-        help="Resume previous Claude session",
+        "targets",
+        nargs="*",
+        help="PR number, branch name, 'list', or 'clean [target]'",
     )
 
     args = parser.parse_args()
@@ -681,11 +675,12 @@ def main() -> int:
     elif args.command == "init":
         return cmd_init(args)
     elif args.command == "test":
-        if args.resume or args.target == "resume":
-            return cmd_test_resume(args)
-        elif args.target == "clear":
-            return cmd_test_clear(args)
-        elif args.target:
+        first = args.targets[0] if args.targets else None
+        if first == "list":
+            return cmd_test_list(args)
+        elif first in ("clean", "clear"):
+            return cmd_test_clean(args)
+        elif first:
             return cmd_test(args)
         else:
             test_parser.print_help()

@@ -32,7 +32,7 @@ When you label an issue with `clover`, Clover will:
 
 You can then review the PR, make any changes (with Claude's assistance, if you want). When you're happy, commit and push as normal, then merge the PR.
 
-For manual testing, run `clover test <PR>` to checkout a PR branch and launch Claude with full context. When you're done, Clover checks for uncommitted or unpushed changes and returns you to your original branch.
+For manual testing, run `clover test <PR>` to create an isolated worktree and launch Claude with full context. Your main working directory stays untouched, and you can run multiple tests concurrently.
 
 
 ## Installation
@@ -214,23 +214,36 @@ These run in the PR's worktree before Claude reviews. Results are included in th
 
 ### Manual Testing with `clover test`
 
-For hands-on testing of PRs:
+For hands-on testing of PRs, `clover test` creates an isolated git worktree so your main working directory stays untouched. Multiple tests can run concurrently in separate terminals.
 
 ```bash
-# Start testing - checks out PR branch, launches Claude with context
+# Start testing - creates a worktree, launches Claude with context
 clover test 184          # By PR number
 clover test #184         # With hash prefix
 clover test feature/foo  # By branch name
 
-# Claude knows the PR/issue context and can look them up
+# Claude runs in the isolated worktree with full PR/issue context.
+# Your main repo is untouched - you can keep working in another terminal.
 
-# If you exit Claude, resume the session
-clover test resume
+# When Claude exits, Clover checks for uncommitted/unpushed changes
+# and prints the worktree path and cleanup command.
 ```
 
-When you exit Claude, Clover checks for uncommitted or unpushed changes:
-- If clean: returns you to your original branch
-- If dirty: stays on branch and shows what needs attention
+Managing test worktrees:
+
+```bash
+# List active test worktrees
+clover test list
+
+# Clean up a specific test worktree
+clover test clean 184          # By PR number
+clover test clean feature-foo  # By branch name
+
+# Clean up all test worktrees
+clover test clean
+```
+
+If a worktree has uncommitted changes, `clean` will warn you and ask for confirmation before removing it. You can also `cd` into any worktree to inspect or continue working manually.
 
 ### Other Commands
 
