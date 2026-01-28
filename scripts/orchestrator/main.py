@@ -818,7 +818,7 @@ class Orchestrator:
 
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
-                worktree.path, f"origin/{pr.branch}"
+                worktree.path, pr.branch
             )
 
             if not has_commits:
