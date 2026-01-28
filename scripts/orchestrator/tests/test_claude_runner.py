@@ -141,6 +141,30 @@ class TestClaudeRunner:
             assert result.exit_code == 1
 
     @pytest.mark.asyncio
+    async def test_run_streaming_fallback(self, runner):
+        """Test that streamed content is used as fallback when result is empty."""
+        # Simulate streaming: content_block_delta events followed by empty result
+        streaming_lines = [
+            json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Summary: "}}).encode() + b"\n",
+            json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Implemented feature X"}}).encode() + b"\n",
+            json.dumps({"type": "result", "result": "", "total_cost_usd": 0.03}).encode() + b"\n",
+        ]
+
+        mock_proc = create_mock_process(
+            stdout_lines=streaming_lines,
+            returncode=0
+        )
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)):
+            result = await runner.run(
+                prompt="Test prompt",
+                cwd=Path("/tmp/test"),
+            )
+
+            assert result.success is True
+            assert "Summary: Implemented feature X" in result.output
+
+    @pytest.mark.asyncio
     async def test_run_timeout(self, runner):
         """Test Claude run timeout."""
         mock_proc = MagicMock()

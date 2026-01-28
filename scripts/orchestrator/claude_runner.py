@@ -175,9 +175,11 @@ class ClaudeRunner:
             last_text_output_time = 0
             # Track last assistant message for fallback if result is empty
             last_assistant_text = ""
+            # Accumulate all streamed text for fallback (streaming may not populate last_assistant_text)
+            accumulated_text = ""
 
             async def read_stdout():
-                nonlocal first_response, text_buffer, last_text_output_time
+                nonlocal first_response, text_buffer, last_text_output_time, accumulated_text
                 import time
 
                 while True:
@@ -226,6 +228,7 @@ class ClaudeRunner:
                                     text = delta.get("text", "")
                                     if text:
                                         text_buffer += text
+                                        accumulated_text += text
                                         # Output accumulated text periodically (every ~500ms)
                                         # or when buffer gets long enough
                                         now = time.time()
@@ -342,10 +345,13 @@ class ClaudeRunner:
                     pass
 
             if not output:
-                # Fallback to last assistant message if result was empty
-                output = last_assistant_text or stderr_str or "No output"
+                # Fallback to assistant text if result was empty
+                # Try last_assistant_text first (from full messages), then accumulated streaming text
+                output = last_assistant_text or accumulated_text or stderr_str or "No output"
                 if last_assistant_text:
                     logger.debug("Using last assistant message as output (result was empty)")
+                elif accumulated_text:
+                    logger.debug("Using accumulated streaming text as output (result was empty)")
 
             success = proc.returncode == 0
 
