@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -137,6 +138,59 @@ class TestSessionManager:
 
         return worktree_path
 
+    async def _run_setup_script(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        pr_number: Optional[int],
+    ) -> None:
+        """Run setup script if configured.
+
+        Args:
+            worktree_path: Path to the worktree directory.
+            branch_name: Name of the branch.
+            pr_number: PR number if testing a PR, None for branch testing.
+
+        Raises:
+            FileNotFoundError: If setup script doesn't exist.
+            RuntimeError: If setup script fails.
+        """
+        if not self.config.setup_script:
+            return
+
+        script_path = self.config.repo_path / self.config.setup_script
+        if not script_path.exists():
+            raise FileNotFoundError(f"Setup script not found: {script_path}")
+
+        env = {
+            **os.environ,
+            "CLOVER_PARENT_REPO": str(self.config.repo_path),
+            "CLOVER_WORKTREE": str(worktree_path),
+            "CLOVER_BRANCH": branch_name,
+            "CLOVER_WORK_TYPE": "test",
+        }
+        if pr_number is not None:
+            env["CLOVER_PR_NUMBER"] = str(pr_number)
+
+        logger.info(f"Running setup script: {script_path}")
+
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            str(script_path),
+            cwd=worktree_path,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await process.communicate()
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Setup script failed (exit {process.returncode}): {stdout.decode()}"
+            )
+
+        logger.info("Setup script completed successfully")
+
     async def start(self, target: str) -> None:
         """Start testing a PR or branch in an isolated worktree.
 
@@ -179,6 +233,9 @@ class TestSessionManager:
         # Create the worktree
         logger.info(f"Creating worktree at {wt_path}...")
         await self._create_test_worktree(wt_path, branch_name)
+
+        # Run setup script if configured
+        await self._run_setup_script(wt_path, branch_name, pr_number)
 
         # Launch Claude
         await self._launch_claude(
