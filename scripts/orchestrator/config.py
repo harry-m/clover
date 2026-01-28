@@ -72,6 +72,10 @@ class Config:
     # Path relative to repo root, receives CLOVER_* env vars
     setup_script: Optional[str] = None
 
+    # Custom command to invoke Claude (e.g., "docker exec -it dev claude")
+    # If not set, finds "claude" in PATH
+    claude_command: Optional[str] = None
+
     @property
     def repo_owner(self) -> str:
         """Extract owner from github_repo."""
@@ -158,6 +162,9 @@ class Config:
         # Setup script (optional)
         setup_script = daemon.get("setup_script")
 
+        # Claude command (optional)
+        claude_command = daemon.get("claude_command")
+
         return cls(
             github_token=github_token,
             github_repo=github_repo,
@@ -172,6 +179,7 @@ class Config:
             review_commands=review_commands,
             test=test,
             setup_script=setup_script,
+            claude_command=claude_command,
         )
 
 

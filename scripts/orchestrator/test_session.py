@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -252,6 +253,29 @@ class TestSessionManager:
             branch_name=branch_name,
         )
 
+    def _get_claude_command(self) -> list[str]:
+        """Get the command to invoke Claude.
+
+        Returns:
+            List of command parts to execute Claude.
+        """
+        # Use custom command if configured
+        if self.config.claude_command:
+            return shlex.split(self.config.claude_command)
+
+        # Find claude in PATH
+        claude_path = shutil.which("claude")
+        if claude_path:
+            return [claude_path]
+
+        # On Windows, check common locations
+        for name in ["claude.cmd", "claude.exe", "claude.bat"]:
+            claude_path = shutil.which(name)
+            if claude_path:
+                return [claude_path]
+
+        return []
+
     async def _launch_claude(
         self,
         cwd: Path,
@@ -260,17 +284,12 @@ class TestSessionManager:
         linked_issue: Optional[int],
     ) -> None:
         """Launch Claude with PR/branch context in the given directory."""
-        claude_path = shutil.which("claude")
-        if not claude_path:
-            for name in ["claude.cmd", "claude.exe", "claude.bat"]:
-                claude_path = shutil.which(name)
-                if claude_path:
-                    break
-
-        if not claude_path:
+        claude_cmd = self._get_claude_command()
+        if not claude_cmd:
             logger.error(
-                "Claude not found in PATH. Install with: "
-                "npm install -g @anthropic-ai/claude-code"
+                "Claude not found. Install with: "
+                "npm install -g @anthropic-ai/claude-code "
+                "or configure daemon.claude_command in clover.yaml"
             )
             return
 
@@ -295,7 +314,7 @@ class TestSessionManager:
         logger.info(f"Launching Claude for {label} in {cwd}...")
 
         subprocess.run(
-            [claude_path, prompt],
+            [*claude_cmd, prompt],
             cwd=cwd,
             shell=(sys.platform == "win32"),
         )

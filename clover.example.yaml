@@ -37,6 +37,13 @@ daemon:
   # Receives environment variables: CLOVER_WORKTREE, CLOVER_BRANCH, etc.
   # setup_script: scripts/setup-worktree.sh
 
+  # Custom command to invoke Claude (optional)
+  # Use this if claude is not in PATH or to run via docker/ssh
+  # Examples:
+  #   claude_command: docker exec -it dev-container claude
+  #   claude_command: /custom/path/to/claude
+  # claude_command: claude
+
 # Review settings - commands to run during PR review
 review:
   commands:

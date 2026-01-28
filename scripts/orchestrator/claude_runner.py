@@ -16,16 +16,24 @@ from .config import Config
 logger = logging.getLogger(__name__)
 
 
-def _find_claude_cli() -> str:
-    """Find the claude CLI executable.
+def _find_claude_cli(custom_command: str | None = None) -> list[str]:
+    """Find the claude CLI executable or use custom command.
+
+    Args:
+        custom_command: Optional custom command string (e.g., "docker exec -it dev claude").
 
     Returns:
-        Path to claude CLI or just 'claude' if in PATH.
+        List of command parts to execute Claude.
     """
+    # Use custom command if configured
+    if custom_command:
+        import shlex
+        return shlex.split(custom_command)
+
     # First check if it's in PATH
     claude_path = shutil.which("claude")
     if claude_path:
-        return claude_path
+        return [claude_path]
 
     # On Windows, check common npm locations
     if os.name == "nt":
@@ -36,9 +44,9 @@ def _find_claude_cli() -> str:
         ]
         for path in possible_paths:
             if path.exists():
-                return str(path)
+                return [str(path)]
 
-    return "claude"  # Fall back to hoping it's in PATH
+    return ["claude"]  # Fall back to hoping it's in PATH
 
 
 @dataclass
@@ -105,12 +113,12 @@ class ClaudeRunner:
             ]
 
         # Find claude CLI
-        claude_cli = _find_claude_cli()
-        logger.debug(f"Using Claude CLI: {claude_cli}")
+        claude_cmd = _find_claude_cli(self.config.claude_command)
+        logger.debug(f"Using Claude command: {claude_cmd}")
 
         # Build command - use stream-json for real-time visibility
         cmd = [
-            claude_cli,
+            *claude_cmd,
             "-p",  # Print mode (non-interactive)
             "--output-format", "stream-json",
             "--verbose",
