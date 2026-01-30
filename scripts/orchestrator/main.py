@@ -486,8 +486,8 @@ class Orchestrator:
                         f"Failed to rebase on {self._default_branch}: {error_msg}"
                     )
 
-            # Push branch
-            await self.worktrees.push_branch(worktree.path, branch_name)
+            # Push branch (force needed after rebase)
+            await self.worktrees.push_branch(worktree.path, branch_name, force=True)
 
             # Create PR (GitHub body limit is 65536 chars)
             pr_body = f"""Implements #{issue.number}
@@ -848,8 +848,8 @@ class Orchestrator:
                     f"*— Clover, the Claude Overseer*",
                 )
             else:
-                # Push commits to the existing PR branch
-                await self.worktrees.push_branch(worktree.path, pr.branch)
+                # Push commits to the existing PR branch (force needed after rebase)
+                await self.worktrees.push_branch(worktree.path, pr.branch, force=True)
 
                 # Post completion comment
                 await self.github.post_comment(

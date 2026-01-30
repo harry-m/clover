@@ -455,16 +455,21 @@ class WorktreeManager:
         )
         return output
 
-    async def push_branch(self, worktree_path: Path, branch_name: str) -> None:
+    async def push_branch(
+        self, worktree_path: Path, branch_name: str, force: bool = False
+    ) -> None:
         """Push a branch to origin.
 
         Args:
             worktree_path: Path to the worktree.
             branch_name: Name of the branch to push.
+            force: Use --force-with-lease for safe force push (needed after rebase).
         """
-        await self._run_git(
-            "push", "-u", "origin", branch_name, cwd=worktree_path
-        )
+        args = ["push", "-u"]
+        if force:
+            args.append("--force-with-lease")
+        args.extend(["origin", branch_name])
+        await self._run_git(*args, cwd=worktree_path)
         logger.info(f"Pushed branch {branch_name} to origin")
 
     async def delete_remote_branch(self, branch_name: str) -> None:

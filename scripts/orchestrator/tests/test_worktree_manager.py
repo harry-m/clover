@@ -198,6 +198,29 @@ branch refs/heads/clover/issue-42
             assert "-u" in call_args[0]
             assert "origin" in call_args[0]
             assert "feature-branch" in call_args[0]
+            assert "--force-with-lease" not in call_args[0]
+
+    @pytest.mark.asyncio
+    async def test_push_branch_force(self, manager):
+        """Test force pushing a branch after rebase."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch.object(
+            asyncio, "create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await manager.push_branch(
+                Path("/tmp/worktrees/test"), "feature-branch", force=True
+            )
+
+            # Verify git push was called with --force-with-lease
+            call_args = mock_exec.call_args
+            assert "push" in call_args[0]
+            assert "-u" in call_args[0]
+            assert "--force-with-lease" in call_args[0]
+            assert "origin" in call_args[0]
+            assert "feature-branch" in call_args[0]
 
     @pytest.mark.asyncio
     async def test_get_default_branch_main(self, manager):
