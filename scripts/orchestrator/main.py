@@ -706,6 +706,23 @@ class Orchestrator:
                 worktree.path, pr.branch, "pr_fix", pr.number
             )
 
+            # Rebase on base branch before starting work to avoid push failures
+            is_behind = await self.worktrees.is_behind_base(
+                worktree.path, self._default_branch
+            )
+            if is_behind:
+                logger.info(
+                    f"PR #{pr.number}: Branch is behind {self._default_branch}, "
+                    "rebasing before starting work..."
+                )
+                success, error_msg = await self.worktrees.rebase_on_base(
+                    worktree.path, self._default_branch
+                )
+                if not success:
+                    raise ClaudeRunnerError(
+                        f"Failed to rebase on {self._default_branch}: {error_msg}"
+                    )
+
             # Run Claude to implement review suggestions
             on_output = self.display.get_output_callback(agent) if agent else None
             result = await self.claude.implement_review(
@@ -831,20 +848,6 @@ class Orchestrator:
                     f"*— Clover, the Claude Overseer*",
                 )
             else:
-                # Rebase on base branch if needed to avoid conflicts
-                is_behind = await self.worktrees.is_behind_base(
-                    worktree.path, self._default_branch
-                )
-                if is_behind:
-                    logger.info(f"Branch is behind {self._default_branch}, rebasing...")
-                    success, error_msg = await self.worktrees.rebase_on_base(
-                        worktree.path, self._default_branch
-                    )
-                    if not success:
-                        raise ClaudeRunnerError(
-                            f"Failed to rebase on {self._default_branch}: {error_msg}"
-                        )
-
                 # Push commits to the existing PR branch
                 await self.worktrees.push_branch(worktree.path, pr.branch)
 
