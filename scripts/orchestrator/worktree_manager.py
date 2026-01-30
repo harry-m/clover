@@ -404,6 +404,25 @@ class WorktreeManager:
 
         return worktrees
 
+    async def get_commit_count(self, worktree_path: Path, base_branch: str) -> int:
+        """Get the number of commits ahead of the base branch.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to compare against.
+
+        Returns:
+            Number of commits ahead of origin/base_branch.
+        """
+        _, output, _ = await self._run_git(
+            "rev-list", f"origin/{base_branch}..HEAD", "--count",
+            cwd=worktree_path, check=False
+        )
+        try:
+            return int(output.strip())
+        except ValueError:
+            return 0
+
     async def has_commits_ahead(self, worktree_path: Path, base_branch: str) -> bool:
         """Check if the current branch has commits ahead of base branch.
 

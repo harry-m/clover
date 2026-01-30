@@ -404,6 +404,83 @@ class Orchestrator:
                         f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
                     )
 
+            # Pre-PR review-fix cycles
+            if self.config.max_review_fix_cycles > 0:
+                for cycle in range(self.config.max_review_fix_cycles):
+                    commits_before = await self.worktrees.get_commit_count(
+                        worktree.path, self._default_branch
+                    )
+
+                    # Review (read-only, fresh session)
+                    logger.info(
+                        f"Issue #{issue.number}: Pre-PR review cycle {cycle + 1}/"
+                        f"{self.config.max_review_fix_cycles}"
+                    )
+                    on_output = self.display.get_output_callback(agent) if agent else None
+                    review_result = await self.claude.review_diff(
+                        issue_number=issue.number,
+                        issue_title=issue.title,
+                        issue_body=issue.body,
+                        base_branch=self._default_branch,
+                        cwd=worktree.path,
+                        on_output=on_output,
+                    )
+
+                    if not review_result.success:
+                        logger.warning(
+                            f"Issue #{issue.number}: Pre-PR review failed, "
+                            "continuing to tests"
+                        )
+                        break
+
+                    # Fix (write, fresh session)
+                    on_output = self.display.get_output_callback(agent) if agent else None
+                    fix_result = await self.claude.implement_diff_review(
+                        issue_number=issue.number,
+                        issue_title=issue.title,
+                        review_feedback=review_result.output,
+                        cwd=worktree.path,
+                        on_output=on_output,
+                    )
+
+                    if not fix_result.success:
+                        logger.warning(
+                            f"Issue #{issue.number}: Pre-PR review fix failed, "
+                            "continuing to tests"
+                        )
+                        break
+
+                    # Handle uncommitted changes after fix
+                    has_uncommitted = await self.worktrees.has_uncommitted_changes(
+                        worktree.path
+                    )
+                    if has_uncommitted:
+                        uncommitted_status = await self.worktrees.get_uncommitted_status(
+                            worktree.path
+                        )
+                        logger.warning(
+                            f"Issue #{issue.number}: Review fix left uncommitted changes, "
+                            f"retrying commit. Files:\n{uncommitted_status}"
+                        )
+                        on_output = self.display.get_output_callback(agent) if agent else None
+                        await self.claude.commit_uncommitted_changes(
+                            uncommitted_status=uncommitted_status,
+                            context=f"issue #{issue.number}: {issue.title} (review fix)",
+                            cwd=worktree.path,
+                            on_output=on_output,
+                        )
+
+                    # Early exit: if fix made no new commits, no point continuing
+                    commits_after = await self.worktrees.get_commit_count(
+                        worktree.path, self._default_branch
+                    )
+                    if commits_after == commits_before:
+                        logger.info(
+                            f"Issue #{issue.number}: Review fix cycle {cycle + 1} "
+                            "made no changes, stopping review cycles"
+                        )
+                        break
+
             # Run tests if configured
             if self.config.review_commands:
                 max_test_retries = 2

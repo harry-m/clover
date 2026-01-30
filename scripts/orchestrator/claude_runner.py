@@ -661,6 +661,103 @@ Use `git add` to stage files and `git commit` to commit them.
             allowed_tools=["Bash", "Read", "Edit", "Glob", "Grep"],
         )
 
+    async def review_diff(
+        self,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        base_branch: str,
+        cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+    ) -> ClaudeResult:
+        """Review the implementation diff before PR creation.
+
+        Args:
+            issue_number: GitHub issue number.
+            issue_title: Issue title.
+            issue_body: Issue body/description.
+            base_branch: Base branch to diff against.
+            cwd: Worktree path with the implementation.
+            on_output: Optional callback for output lines.
+
+        Returns:
+            ClaudeResult with review feedback.
+        """
+        prompt = f"""Review the implementation for this GitHub issue before PR creation:
+
+# Issue #{issue_number}: {issue_title}
+
+{issue_body}
+
+---
+
+Instructions:
+1. Run `git diff origin/{base_branch}...HEAD` to see all changes made for this issue
+2. Review the changes for correctness, security, edge cases, and code quality
+3. Classify each finding as BLOCKING, SUGGESTION, or NITPICK
+4. Focus on substantive issues — do not nitpick style preferences
+
+Provide your review with findings categorized by severity.
+"""
+
+        system_prompt_file = self.config.prompts_dir / "pre_pr_review.md"
+
+        return await self.run(
+            prompt=prompt,
+            cwd=cwd,
+            system_prompt_file=system_prompt_file,
+            on_output=on_output,
+            allowed_tools=["Bash", "Read", "Glob", "Grep"],
+        )
+
+    async def implement_diff_review(
+        self,
+        issue_number: int,
+        issue_title: str,
+        review_feedback: str,
+        cwd: Path,
+        on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+    ) -> ClaudeResult:
+        """Fix issues found during pre-PR review.
+
+        Args:
+            issue_number: GitHub issue number.
+            issue_title: Issue title.
+            review_feedback: The review feedback to address.
+            cwd: Worktree path with the implementation.
+            on_output: Optional callback for output lines.
+
+        Returns:
+            ClaudeResult.
+        """
+        prompt = f"""Address the review feedback for issue #{issue_number}: {issue_title}
+
+## Review Feedback
+
+{review_feedback}
+
+---
+
+Instructions:
+1. Read the review feedback carefully
+2. Address all BLOCKING items — these must be fixed
+3. Address SUGGESTION items where you agree they improve the code
+4. Skip NITPICK items — do not act on them
+5. If you make any changes, you MUST commit them using git. Run `git add` and `git commit` with a clear message. Uncommitted changes will be lost!
+6. If no changes are needed (e.g., no BLOCKING or SUGGESTION items), state that explicitly
+
+When done, summarize what you changed and which items you addressed.
+"""
+
+        system_prompt_file = self.config.prompts_dir / "implement_review.md"
+
+        return await self.run(
+            prompt=prompt,
+            cwd=cwd,
+            system_prompt_file=system_prompt_file,
+            on_output=on_output,
+        )
+
     async def fix_failing_tests(
         self,
         test_output: str,

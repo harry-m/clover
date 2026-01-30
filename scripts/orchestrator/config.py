@@ -76,6 +76,9 @@ class Config:
     # If not set, finds "claude" in PATH
     claude_command: Optional[str] = None
 
+    # Pre-PR review-fix cycles (0 to disable)
+    max_review_fix_cycles: int = 2
+
     @property
     def repo_owner(self) -> str:
         """Extract owner from github_repo."""
@@ -150,6 +153,7 @@ class Config:
 
         # Review commands
         review_commands = review.get("commands", [])
+        max_review_fix_cycles = review.get("max_review_fix_cycles", 2)
         if not isinstance(review_commands, list):
             raise ValueError("review.commands must be a list")
 
@@ -180,6 +184,7 @@ class Config:
             test=test,
             setup_script=setup_script,
             claude_command=claude_command,
+            max_review_fix_cycles=max_review_fix_cycles,
         )
 
 
