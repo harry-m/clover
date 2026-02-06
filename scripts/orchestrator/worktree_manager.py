@@ -474,6 +474,22 @@ class WorktreeManager:
         )
         return output
 
+    async def get_commit_log(self, worktree_path: Path, base_branch: str) -> str:
+        """Get commit messages for commits ahead of the base branch.
+
+        Args:
+            worktree_path: Path to the worktree.
+            base_branch: Base branch to compare against.
+
+        Returns:
+            Formatted commit log, or empty string if no commits.
+        """
+        _, output, _ = await self._run_git(
+            "log", f"origin/{base_branch}..HEAD", "--format=%s",
+            cwd=worktree_path, check=False
+        )
+        return output.strip()
+
     async def push_branch(
         self, worktree_path: Path, branch_name: str, force: bool = False
     ) -> None:

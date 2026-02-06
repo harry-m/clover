@@ -165,6 +165,53 @@ class TestClaudeRunner:
             assert "Summary: Implemented feature X" in result.output
 
     @pytest.mark.asyncio
+    async def test_run_assistant_message_fallback(self, runner):
+        """Test that assistant message text is used as fallback when result is empty."""
+        # Simulate: assistant message with text content, followed by empty result
+        streaming_lines = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "I implemented the feature successfully."}]}}).encode() + b"\n",
+            json.dumps({"type": "result", "result": "", "total_cost_usd": 0.03}).encode() + b"\n",
+        ]
+
+        mock_proc = create_mock_process(
+            stdout_lines=streaming_lines,
+            returncode=0
+        )
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)):
+            result = await runner.run(
+                prompt="Test prompt",
+                cwd=Path("/tmp/test"),
+            )
+
+            assert result.success is True
+            assert "I implemented the feature successfully." in result.output
+
+    @pytest.mark.asyncio
+    async def test_run_no_output_returns_empty_string(self, runner):
+        """Test that no output returns empty string (not 'No output')."""
+        # Simulate: empty result with no streaming content
+        streaming_lines = [
+            json.dumps({"type": "result", "result": "", "total_cost_usd": 0.01}).encode() + b"\n",
+        ]
+
+        mock_proc = create_mock_process(
+            stdout_lines=streaming_lines,
+            returncode=0
+        )
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)):
+            result = await runner.run(
+                prompt="Test prompt",
+                cwd=Path("/tmp/test"),
+            )
+
+            assert result.success is True
+            # Should be empty string, not "No output"
+            assert result.output == ""
+            assert "No output" not in result.output
+
+    @pytest.mark.asyncio
     async def test_run_timeout(self, runner):
         """Test Claude run timeout."""
         mock_proc = MagicMock()

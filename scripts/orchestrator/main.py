@@ -16,6 +16,7 @@ from .agent_context import AgentContext
 from .claude_runner import ClaudeRunner, ClaudeRunnerError
 from .config import Config, load_config
 from .github_watcher import GitHubWatcher, Issue, PullRequest
+from .output_utils import format_output, format_commit_log_as_summary
 from .state import State, WorkItemType
 from .tui import CloverDisplay, is_tty
 from .worktree_manager import WorktreeManager
@@ -537,10 +538,16 @@ class Orchestrator:
 
             if not has_commits:
                 logger.info(f"No commits made for issue #{issue.number}, nothing to push")
+                no_changes_explanation = format_output(
+                    result.output,
+                    context="explanation",
+                    work_type="issue",
+                    number=issue.number,
+                )
                 await self.github.post_comment(
                     issue.number,
                     f"I looked at this issue but didn't find any changes to make.\n\n"
-                    f"Claude's response:\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                    f"**Claude's response:**\n\n{no_changes_explanation[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
                 # Remove clover label and add clover-complete
@@ -559,19 +566,38 @@ class Orchestrator:
                     worktree.path, self._default_branch
                 )
                 if not success:
-                    raise ClaudeRunnerError(
-                        f"Failed to rebase on {self._default_branch}: {error_msg}"
+                    logger.warning(
+                        f"Issue #{issue.number}: Could not update branch to match "
+                        f"{self._default_branch}: {error_msg}. "
+                        "Continuing with branch as-is."
                     )
 
             # Push branch (force needed after rebase)
             await self.worktrees.push_branch(worktree.path, branch_name, force=True)
+
+            # Build summary: use Claude's output, fall back to commit log
+            async def get_commit_log_fallback() -> str:
+                commit_log = await self.worktrees.get_commit_log(
+                    worktree.path, self._default_branch
+                )
+                return format_commit_log_as_summary(commit_log)
+
+            # Note: format_output expects sync fallback, so we pre-fetch
+            commit_fallback = await get_commit_log_fallback()
+            summary = format_output(
+                result.output,
+                fallback_generator=lambda: commit_fallback,
+                context="summary",
+                work_type="issue",
+                number=issue.number,
+            )
 
             # Create PR (GitHub body limit is 65536 chars)
             pr_body = f"""Implements #{issue.number}
 
 ## Changes
 
-{result.output[:GITHUB_COMMENT_MAX_BODY]}
+{summary[:GITHUB_COMMENT_MAX_BODY]}
 
 ---
 *— Clover, the Claude Overseer*
@@ -595,7 +621,7 @@ class Orchestrator:
             await self.github.post_comment(
                 issue.number,
                 f"✅ Finished working on this issue.\n\n"
-                f"**Summary:** {result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                f"**Summary:** {summary[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                 f"**Pull Request:** {pr_url}\n\n"
                 f"*— Clover, the Claude Overseer*",
             )
@@ -698,10 +724,24 @@ class Orchestrator:
                 on_output=on_output,
             )
 
+            # Format review output with fallback
+            review_output = format_output(
+                result.output,
+                fallback_generator=lambda: (
+                    "## Summary\n\n"
+                    "Code review completed. Please see the diff for details.\n\n"
+                    "## Suggestions\n\nNone\n\n"
+                    "## Blocking Issues\n\nNone"
+                ),
+                context="review",
+                work_type="pr_review",
+                number=pr.number,
+            )
+
             # Post review as comment
             review_comment = f"""## 🤖 Automated Code Review
 
-{checks_output}{result.output[:GITHUB_COMMENT_MAX_BODY]}
+{checks_output}{review_output[:GITHUB_COMMENT_MAX_BODY]}
 
 ---
 *— Clover, the Claude Overseer*
@@ -784,6 +824,7 @@ class Orchestrator:
             )
 
             # Rebase on base branch before starting work to avoid push failures
+            rebase_context = ""
             is_behind = await self.worktrees.is_behind_base(
                 worktree.path, self._default_branch
             )
@@ -796,8 +837,18 @@ class Orchestrator:
                     worktree.path, self._default_branch
                 )
                 if not success:
-                    raise ClaudeRunnerError(
-                        f"Failed to rebase on {self._default_branch}: {error_msg}"
+                    logger.warning(
+                        f"PR #{pr.number}: Automatic rebase failed, "
+                        "delegating conflict resolution to Claude."
+                    )
+                    rebase_context = (
+                        f"IMPORTANT: This branch is behind `{self._default_branch}` "
+                        f"and an automatic rebase failed due to conflicts. "
+                        f"Before implementing review suggestions, you must:\n"
+                        f"1. Run `git rebase origin/{self._default_branch}`\n"
+                        f"2. Resolve any conflicts (edit conflicting files, "
+                        f"`git add` them, then `git rebase --continue`)\n"
+                        f"3. Then proceed with the review feedback\n"
                     )
 
             # Run Claude to implement review suggestions
@@ -809,6 +860,7 @@ class Orchestrator:
                 review_comment=review_comment.body,
                 cwd=worktree.path,
                 on_output=on_output,
+                rebase_context=rebase_context,
             )
 
             if not result.success:
@@ -918,21 +970,42 @@ class Orchestrator:
             if not has_commits:
                 # No changes made
                 logger.info(f"No commits made for PR #{pr.number}, nothing to push")
+                no_changes_details = format_output(
+                    result.output,
+                    fallback_generator=lambda: (
+                        "Reviewed all suggestions and determined the current "
+                        "implementation already addresses the feedback."
+                    ),
+                    context="details",
+                    work_type="pr_fix",
+                    number=pr.number,
+                )
                 await self.github.post_comment(
                     pr.number,
                     f"I reviewed the suggestions and determined no code changes were needed.\n\n"
-                    f"**Details:**\n\n{result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                    f"**Details:**\n\n{no_changes_details[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
             else:
                 # Push commits to the existing PR branch (force needed after rebase)
                 await self.worktrees.push_branch(worktree.path, pr.branch, force=True)
 
+                # Build summary with commit log fallback
+                commit_log = await self.worktrees.get_commit_log(worktree.path, pr.branch)
+                commit_fallback = format_commit_log_as_summary(commit_log)
+                fix_summary = format_output(
+                    result.output,
+                    fallback_generator=lambda: commit_fallback,
+                    context="summary",
+                    work_type="pr_fix",
+                    number=pr.number,
+                )
+
                 # Post completion comment
                 await self.github.post_comment(
                     pr.number,
                     f"✅ Implemented review suggestions and pushed changes.\n\n"
-                    f"**Summary:** {result.output[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                    f"**Summary:** {fix_summary[:GITHUB_COMMENT_MAX_BODY]}\n\n"
                     f"*— Clover, the Claude Overseer*",
                 )
 

@@ -179,7 +179,7 @@ class ClaudeRunner:
             accumulated_text = ""
 
             async def read_stdout():
-                nonlocal first_response, text_buffer, last_text_output_time, accumulated_text
+                nonlocal first_response, text_buffer, last_text_output_time, last_assistant_text, accumulated_text
                 import time
 
                 while True:
@@ -347,11 +347,16 @@ class ClaudeRunner:
             if not output:
                 # Fallback to assistant text if result was empty
                 # Try last_assistant_text first (from full messages), then accumulated streaming text
-                output = last_assistant_text or accumulated_text or stderr_str or "No output"
+                # Use empty string as final fallback - consumer code handles missing output
+                output = last_assistant_text or accumulated_text or stderr_str or ""
                 if last_assistant_text:
                     logger.debug("Using last assistant message as output (result was empty)")
                 elif accumulated_text:
                     logger.debug("Using accumulated streaming text as output (result was empty)")
+                elif stderr_str:
+                    logger.debug("Using stderr as output (result and text were empty)")
+                else:
+                    logger.warning("Claude produced no output in any channel")
 
             success = proc.returncode == 0
 
@@ -482,7 +487,13 @@ Instructions:
 4. Write or update tests if appropriate
 5. IMPORTANT: You MUST commit your changes using git. Run `git add` and `git commit` with a clear message that references #{issue_number}. Uncommitted changes will be lost!
 
-When done, provide a summary of what you implemented.
+When done, provide a summary in this format:
+
+## Summary
+[1-3 sentences describing what you implemented and why]
+
+## Changes
+[Bullet points of the key changes made]
 """
 
         system_prompt_file = self.config.prompts_dir / "implement.md"
@@ -534,11 +545,19 @@ Instructions:
    - Performance concerns
 4. Provide constructive feedback
 
-Format your review as markdown with sections for:
-- Summary (1-2 sentences)
-- What looks good
-- Suggestions for improvement
-- Any blocking issues
+You MUST format your review as markdown with these exact sections:
+
+## Summary
+[1-2 sentences summarizing the PR and your overall assessment]
+
+## What Looks Good
+[Bullet points of positive aspects]
+
+## Suggestions
+[Bullet points of suggested improvements, or "None" if the code is good]
+
+## Blocking Issues
+[Bullet points of issues that must be fixed before merge, or "None" if there are no blockers]
 """
 
         system_prompt_file = self.config.prompts_dir / "review.md"
@@ -560,6 +579,7 @@ Format your review as markdown with sections for:
         review_comment: str,
         cwd: Path,
         on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+        rebase_context: str = "",
     ) -> ClaudeResult:
         """Run Claude to implement review suggestions for a PR.
 
@@ -570,14 +590,20 @@ Format your review as markdown with sections for:
             review_comment: The review feedback to implement.
             cwd: Worktree path with PR code.
             on_output: Optional callback for output lines.
+            rebase_context: Optional instructions for rebasing if automatic
+                rebase failed due to conflicts.
 
         Returns:
             ClaudeResult.
         """
+        rebase_section = ""
+        if rebase_context:
+            rebase_section = f"\n## Rebase Required\n\n{rebase_context}\n"
+
         prompt = f"""Implement the review suggestions for this pull request:
 
 # PR #{pr_number}: {pr_title}
-
+{rebase_section}
 ## PR Description
 
 {pr_body}
@@ -595,9 +621,13 @@ Instructions:
 4. If you make any changes, you MUST commit them using git. Run `git add` and `git commit` with a clear message. Uncommitted changes will be lost!
 5. If the review has no actionable suggestions (e.g., only positive feedback or suggestions already addressed), explicitly state that no changes were needed.
 
-When done, provide a summary. Be clear about whether you made changes or not:
-- If you made changes: describe what you changed and which suggestions were addressed
-- If no changes were needed: explain why (e.g., "The review only contained positive feedback" or "The suggested changes were already implemented")
+When done, provide a summary in this format:
+
+## Summary
+[1-2 sentences describing what you did]
+
+## Changes Made
+[Bullet points of changes, or "No changes needed" with explanation if you didn't make any changes]
 """
 
         system_prompt_file = self.config.prompts_dir / "implement_review.md"
