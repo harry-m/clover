@@ -23,13 +23,13 @@ if sys.platform == "win32":
 
     asyncio.proactor_events._ProactorBasePipeTransport.__del__ = _silenced_del
 
-from .config import load_config
+from .config import load_config, detect_github_repo, get_clover_dir
 from .main import async_main
 from .state import State, WorkItemStatus, WorkItemType
 from .test_session import TestSessionManager
 
 
-def get_repo_path(args: argparse.Namespace) -> Optional[Path]:
+def _get_repo_path(args: argparse.Namespace) -> Optional[Path]:
     """Get repo path from args, if specified."""
     if hasattr(args, "repo") and args.repo:
         return Path(args.repo)
@@ -100,7 +100,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current state and in-progress work."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -188,7 +188,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_clear(args: argparse.Namespace) -> int:
     """Clear state for an issue or PR to allow re-processing."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -210,11 +210,12 @@ def cmd_clear(args: argparse.Namespace) -> int:
         "feature": WorkItemType.ISSUE,  # synonym
         "review": WorkItemType.PR_REVIEW,
         "pr": WorkItemType.PR_REVIEW,  # synonym
+        "fix": WorkItemType.PR_FIX,
     }
 
     if args.type not in item_type_map:
         print(f"Unknown type: {args.type}")
-        print("Valid types: issue (or feature), review (or pr)")
+        print("Valid types: issue (or feature), review (or pr), fix")
         return 1
 
     item_type = item_type_map[args.type]
@@ -236,26 +237,20 @@ def _clear_all(state: State) -> int:
         print("State is already empty. Nothing to clear.")
         return 0
 
-    # Build summary
-    issues = []
-    reviews = []
+    # Build summary by type
+    by_type: dict[str, list] = {}
 
     for item in state.work_items.values():
-        if item.item_type == WorkItemType.ISSUE:
-            issues.append(item)
-        elif item.item_type == WorkItemType.PR_REVIEW:
-            reviews.append(item)
+        type_name = item.item_type.value
+        by_type.setdefault(type_name, []).append(item)
 
     # Display summary
     print("This will clear ALL state (blank slate):")
     print()
-    if issues:
-        print(f"  Issues ({len(issues)}):")
-        for item in issues:
-            print(f"    - #{item.number} ({item.status.value})")
-    if reviews:
-        print(f"  PR Reviews ({len(reviews)}):")
-        for item in reviews:
+    for type_name, items in sorted(by_type.items()):
+        label = type_name.replace("_", " ").title()
+        print(f"  {label} ({len(items)}):")
+        for item in items:
             print(f"    - #{item.number} ({item.status.value})")
     print()
     print(f"Total: {len(state.work_items)} items will be cleared.")
@@ -280,7 +275,7 @@ def _clear_all(state: State) -> int:
 def cmd_config(args: argparse.Namespace) -> int:
     """Show current configuration."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -295,6 +290,9 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"Max turns:       {config.max_turns}")
     print(f"Worktree base:   {config.worktree_base}")
     print(f"State file:      {config.state_file}")
+    print(f"Config dir:      {config.user_config_dir}")
+    print(f"Claude command:  {config.claude_command or '(auto-detect)'}")
+    print(f"Review-fix cycles: {config.max_review_fix_cycles}")
     print()
     print("Review Settings:")
     if config.review_commands:
@@ -308,47 +306,32 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Initialize a new Clover project."""
-    import re
+    """Initialize Clover for the current repository."""
     import subprocess
 
-    target_dir = get_repo_path(args) or Path.cwd()
-    config_path = target_dir / "clover.yaml"
-    gitignore_path = target_dir / ".gitignore"
+    target_dir = _get_repo_path(args) or Path.cwd()
+
+    # Detect GitHub repo from git remote
+    github_repo = detect_github_repo(target_dir)
+    if not github_repo:
+        print("Error: Could not detect GitHub repository from git remote.")
+        print("Make sure you're in a git repository with an 'origin' remote")
+        print("pointing to GitHub.")
+        return 1
+
+    # Determine config directory
+    config_dir = get_clover_dir(github_repo)
+    config_path = config_dir / "clover.yaml"
 
     # Check if config already exists
     if config_path.exists() and not args.force:
-        print(f"clover.yaml already exists in {target_dir}")
+        print(f"Clover is already configured at {config_path}")
         print("Use --force to overwrite.")
         return 1
 
-    # Try to detect GitHub repo from git remote
-    github_repo = None
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            cwd=target_dir,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            remote_url = result.stdout.strip()
-            # Parse GitHub URL (SSH or HTTPS)
-            # git@github.com:owner/repo.git
-            # https://github.com/owner/repo.git
-            match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote_url)
-            if match:
-                github_repo = f"{match.group(1)}/{match.group(2)}"
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    if not github_repo:
-        github_repo = "owner/repo-name  # TODO: Update with your repo"
-
     # Generate clover.yaml content
-    config_content = f"""# Clover configuration
-# Documentation: https://github.com/anthropics/claude-code
+    config_content = f"""# Clover configuration for {github_repo}
+# Documentation: https://github.com/harry-m/clover
 
 github:
   # Repository in format: owner/repo
@@ -374,6 +357,14 @@ daemon:
   # Maximum turns per Claude conversation (default: 50)
   max_turns: 50
 
+  # Custom command to invoke Claude (optional)
+  # Use this if claude is not in PATH or to run via docker/ssh
+  # claude_command: /custom/path/to/claude
+
+  # Setup script to run after worktree creation (optional)
+  # Path relative to repo root, receives CLOVER_* env vars
+  # setup_script: scripts/setup-worktree.sh
+
 # Review settings - commands to run during PR review
 review:
   commands: []
@@ -383,54 +374,14 @@ review:
     # - pytest
     # - ruff check .
 
-# Test session settings - for `clover test` command
-test:
-  # Path to docker-compose file (default: docker-compose.yml)
-  compose_file: docker-compose.yml
-
-  # Container for interactive Claude sessions (default: first container)
-  # container: develop
+  # Number of self-review/fix cycles before creating PR (default: 2, 0 to disable)
+  # max_review_fix_cycles: 2
 """
 
-    # Write config file
+    # Create config directory and write config file
+    config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(config_content)
     print(f"Created {config_path}")
-
-    # Update .gitignore
-    gitignore_entries = [
-        "# Clover state and working files",
-        ".orchestrator-state.json",
-        ".clover-test-sessions.json",
-        ".clover-compose-override.yml",
-        "worktrees/",
-    ]
-
-    existing_gitignore = ""
-    if gitignore_path.exists():
-        existing_gitignore = gitignore_path.read_text()
-
-    # Check which entries are missing
-    missing_entries = []
-    for entry in gitignore_entries:
-        # Skip comment lines when checking
-        if entry.startswith("#"):
-            continue
-        if entry not in existing_gitignore:
-            missing_entries.append(entry)
-
-    if missing_entries:
-        # Add missing entries
-        with open(gitignore_path, "a") as f:
-            if existing_gitignore and not existing_gitignore.endswith("\n"):
-                f.write("\n")
-            if existing_gitignore:
-                f.write("\n")
-            f.write("# Clover state and working files\n")
-            for entry in missing_entries:
-                f.write(f"{entry}\n")
-        print(f"Updated {gitignore_path}")
-    else:
-        print(".gitignore already has Clover entries")
 
     # Check if gh CLI is authenticated
     gh_authenticated = False
@@ -490,10 +441,6 @@ test:
     print("Next steps:")
     step = 1
 
-    if "TODO" in github_repo:
-        print(f"  {step}. Edit clover.yaml and set your GitHub repository")
-        step += 1
-
     if not gh_authenticated:
         print(f"  {step}. Authenticate with GitHub:")
         print("       gh auth login")
@@ -502,7 +449,7 @@ test:
     print(f"  {step}. Add the 'clover' label to issues you want Clover to work on")
     step += 1
 
-    print(f"  {step}. Start Clover:")
+    print(f"  {step}. Start Clover (from your repo directory):")
     print("       clover run")
 
     return 0
@@ -513,7 +460,7 @@ test:
 def cmd_test(args: argparse.Namespace) -> int:
     """Start a test session for a PR or branch."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -543,7 +490,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 def cmd_test_list(args: argparse.Namespace) -> int:
     """List active test worktrees."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -556,7 +503,7 @@ def cmd_test_list(args: argparse.Namespace) -> int:
 def cmd_test_clean(args: argparse.Namespace) -> int:
     """Clean up test worktrees."""
     try:
-        config = load_config(get_repo_path(args))
+        config = load_config(_get_repo_path(args))
     except ValueError as e:
         print(f"Configuration error: {e}")
         return 1
@@ -625,7 +572,7 @@ def main() -> int:
     clear_parser.add_argument(
         "type",
         nargs="?",
-        choices=["issue", "feature", "review", "pr"],
+        choices=["issue", "feature", "review", "pr", "fix"],
         help="Type of item to clear (feature=issue, pr=review)",
     )
     clear_parser.add_argument(
@@ -639,7 +586,7 @@ def main() -> int:
     subparsers.add_parser("config", help="Show configuration")
 
     # Init command
-    init_parser = subparsers.add_parser("init", help="Initialize a new Clover project")
+    init_parser = subparsers.add_parser("init", help="Initialize Clover for this repository")
     init_parser.add_argument(
         "--force", "-f",
         action="store_true",
@@ -686,17 +633,8 @@ def main() -> int:
             test_parser.print_help()
             return 0
     else:
-        # No command specified - default to run for backwards compatibility
-        # But show help if no args at all
-        if len(sys.argv) == 1:
-            parser.print_help()
-            return 0
-        # Otherwise, treat as run command
-        args.verbose = "-v" in sys.argv or "--verbose" in sys.argv
-        args.once = "--once" in sys.argv
-        args.tui = "--tui" in sys.argv
-        args.no_tui = "--no-tui" in sys.argv
-        return cmd_run(args)
+        parser.print_help()
+        return 0
 
 
 if __name__ == "__main__":

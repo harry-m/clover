@@ -453,7 +453,7 @@ class PortManager:
 
 async def exec_interactive(
     container_name: str,
-    command: list[str] = None,
+    command: Optional[list[str]] = None,
     workdir: Optional[str] = None,
     env: Optional[dict[str, str]] = None,
 ) -> None:

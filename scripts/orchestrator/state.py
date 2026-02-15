@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -130,7 +130,7 @@ class State:
             "work_items": {
                 key: item.to_dict() for key, item in self.work_items.items()
             },
-            "last_updated": datetime.utcnow().isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
         # Ensure parent directory exists
@@ -187,7 +187,7 @@ class State:
             status=WorkItemStatus.IN_PROGRESS,
             worktree_path=worktree_path,
             branch_name=branch_name,
-            started_at=datetime.utcnow().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
         )
 
         self.work_items[key] = item
@@ -218,7 +218,7 @@ class State:
             return
 
         item.status = WorkItemStatus.COMPLETED
-        item.completed_at = datetime.utcnow().isoformat()
+        item.completed_at = datetime.now(timezone.utc).isoformat()
         if related_number is not None:
             item.related_number = related_number
         self._dirty = True
@@ -238,7 +238,7 @@ class State:
             return
 
         item.status = WorkItemStatus.FAILED
-        item.completed_at = datetime.utcnow().isoformat()
+        item.completed_at = datetime.now(timezone.utc).isoformat()
         item.error_message = error_message
         self._dirty = True
         self._save()
@@ -319,7 +319,7 @@ class State:
         Returns:
             Number of items cleaned up.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         stale_keys = []
 
         for key, item in self.work_items.items():

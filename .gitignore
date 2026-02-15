@@ -42,7 +42,6 @@ htmlcov/
 
 # Orchestrator specific
 worktrees/
-.orchestrator-state.json
 .env
 
 # Logs

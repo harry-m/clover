@@ -496,7 +496,7 @@ When done, provide a summary in this format:
 [Bullet points of the key changes made]
 """
 
-        system_prompt_file = self.config.prompts_dir / "implement.md"
+        system_prompt_file = self.config.get_prompt_file("implement.md")
 
         return await self.run(
             prompt=prompt,
@@ -560,7 +560,7 @@ You MUST format your review as markdown with these exact sections:
 [Bullet points of issues that must be fixed before merge, or "None" if there are no blockers]
 """
 
-        system_prompt_file = self.config.prompts_dir / "review.md"
+        system_prompt_file = self.config.get_prompt_file("review.md")
 
         return await self.run(
             prompt=prompt,
@@ -630,7 +630,7 @@ When done, provide a summary in this format:
 [Bullet points of changes, or "No changes needed" with explanation if you didn't make any changes]
 """
 
-        system_prompt_file = self.config.prompts_dir / "implement_review.md"
+        system_prompt_file = self.config.get_prompt_file("implement_review.md")
 
         return await self.run(
             prompt=prompt,
@@ -730,7 +730,7 @@ Instructions:
 Provide your review with findings categorized by severity.
 """
 
-        system_prompt_file = self.config.prompts_dir / "pre_pr_review.md"
+        system_prompt_file = self.config.get_prompt_file("pre_pr_review.md")
 
         return await self.run(
             prompt=prompt,
@@ -779,7 +779,7 @@ Instructions:
 When done, summarize what you changed and which items you addressed.
 """
 
-        system_prompt_file = self.config.prompts_dir / "implement_review.md"
+        system_prompt_file = self.config.get_prompt_file("implement_review.md")
 
         return await self.run(
             prompt=prompt,

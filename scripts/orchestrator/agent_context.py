@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -17,7 +17,7 @@ class AgentContext:
     number: int
     title: str
     branch_name: Optional[str] = None
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = None
     output_lines: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     status: str = "running"  # "running", "completed", "failed"
@@ -34,18 +34,18 @@ class AgentContext:
     def mark_completed(self) -> None:
         """Mark the agent as completed."""
         self.status = "completed"
-        self.finished_at = datetime.utcnow()
+        self.finished_at = datetime.now(timezone.utc)
 
     def mark_failed(self) -> None:
         """Mark the agent as failed."""
         self.status = "failed"
-        self.finished_at = datetime.utcnow()
+        self.finished_at = datetime.now(timezone.utc)
 
     def seconds_since_finished(self) -> Optional[float]:
         """Return seconds since the agent finished, or None if still running."""
         if self.finished_at is None:
             return None
-        return (datetime.utcnow() - self.finished_at).total_seconds()
+        return (datetime.now(timezone.utc) - self.finished_at).total_seconds()
 
 
 class AgentRegistry:

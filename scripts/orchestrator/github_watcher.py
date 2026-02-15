@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -181,45 +181,72 @@ class GitHubWatcher:
             **kwargs: Additional arguments for httpx.
 
         Returns:
-            JSON response.
+            JSON response (empty dict for 204 No Content).
 
         Raises:
             GitHubError: If the request fails.
             RateLimitError: If rate limit is exceeded.
         """
-        client = await self._get_client()
+        max_retries = 3
 
-        # Check if we should wait for rate limit reset
-        if (
-            self._rate_limit_remaining is not None
-            and self._rate_limit_remaining <= 1
-            and self._rate_limit_reset is not None
-        ):
-            wait_seconds = (self._rate_limit_reset - datetime.utcnow()).total_seconds()
-            if wait_seconds > 0:
-                logger.warning(f"Rate limit low, waiting {wait_seconds:.0f}s")
-                await asyncio.sleep(wait_seconds)
+        for attempt in range(max_retries):
+            client = await self._get_client()
 
-        response = await client.request(method, path, **kwargs)
+            # Check if we should wait for rate limit reset
+            if (
+                self._rate_limit_remaining is not None
+                and self._rate_limit_remaining <= 1
+                and self._rate_limit_reset is not None
+            ):
+                wait_seconds = (self._rate_limit_reset - datetime.now(timezone.utc)).total_seconds()
+                if wait_seconds > 0:
+                    logger.warning(f"Rate limit low, waiting {wait_seconds:.0f}s")
+                    await asyncio.sleep(wait_seconds)
 
-        # Update rate limit info
-        if "X-RateLimit-Remaining" in response.headers:
-            self._rate_limit_remaining = int(response.headers["X-RateLimit-Remaining"])
-        if "X-RateLimit-Reset" in response.headers:
-            self._rate_limit_reset = datetime.fromtimestamp(
-                int(response.headers["X-RateLimit-Reset"])
-            )
+            try:
+                response = await client.request(method, path, **kwargs)
+            except httpx.TransportError as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning(f"Transport error ({e}), retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise GitHubError(f"Transport error after {max_retries} attempts: {e}")
 
-        if response.status_code == 403 and "rate limit" in response.text.lower():
-            raise RateLimitError(self._rate_limit_reset or datetime.utcnow())
+            # Update rate limit info
+            if "X-RateLimit-Remaining" in response.headers:
+                self._rate_limit_remaining = int(response.headers["X-RateLimit-Remaining"])
+            if "X-RateLimit-Reset" in response.headers:
+                self._rate_limit_reset = datetime.fromtimestamp(
+                    int(response.headers["X-RateLimit-Reset"]), tz=timezone.utc
+                )
 
-        if response.status_code >= 400:
-            raise GitHubError(
-                f"GitHub API error: {response.status_code} - {response.text}",
-                status_code=response.status_code,
-            )
+            if response.status_code == 403 and "rate limit" in response.text.lower():
+                raise RateLimitError(self._rate_limit_reset or datetime.now(timezone.utc))
 
-        return response.json()
+            # Retry on transient server errors
+            if response.status_code in (500, 502, 503) and attempt < max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    f"GitHub returned {response.status_code}, retrying in {wait}s..."
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            if response.status_code >= 400:
+                raise GitHubError(
+                    f"GitHub API error: {response.status_code} - {response.text}",
+                    status_code=response.status_code,
+                )
+
+            # Handle 204 No Content (e.g., DELETE responses)
+            if response.status_code == 204:
+                return {}
+
+            return response.json()
+
+        # Should not reach here, but just in case
+        raise GitHubError("Request failed after all retries")
 
     async def get_clover_issues(self) -> list[Issue]:
         """Get issues with the clover label.
@@ -234,6 +261,7 @@ class GitHubWatcher:
             "state": "open",
             "sort": "created",
             "direction": "asc",
+            "per_page": 100,
         }
 
         try:
@@ -261,6 +289,7 @@ class GitHubWatcher:
             "state": "open",
             "sort": "created",
             "direction": "asc",
+            "per_page": 100,
         }
 
         try:

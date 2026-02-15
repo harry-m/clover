@@ -1,5 +1,6 @@
 # Clover configuration
-# Copy this file to clover.yaml in your repository root and customize.
+# This file lives at ~/.clover/<owner>/<repo>/clover.yaml
+# Run `clover init` in your repository to generate it automatically.
 
 # GitHub settings
 github:
@@ -8,7 +9,7 @@ github:
 
   # GitHub token - can use environment variable
   # If not set, Clover will try to get token from `gh auth token`
-  token: ${GITHUB_TOKEN}
+  # token: ${GITHUB_TOKEN}
 
   # Label that triggers Clover to work on issues/PRs (default: clover)
   label: clover
@@ -30,9 +31,6 @@ daemon:
   # Base directory for worktrees (default: ./worktrees)
   # worktree_base: ./worktrees
 
-  # State file location (default: ./.clover-state.json)
-  # state_file: ./.clover-state.json
-
   # Setup script to run after creating a worktree (optional)
   # Receives environment variables: CLOVER_WORKTREE, CLOVER_BRANCH, etc.
   # setup_script: scripts/setup-worktree.sh
@@ -45,13 +43,17 @@ daemon:
   # claude_command: claude
 
 # Review settings - commands to run during PR review
+# NOTE: These commands are executed as shell commands. Only use trusted commands.
 review:
-  commands:
+  commands: []
     # Examples (uncomment and customize for your project):
     # - npm test
     # - npm run lint
     # - pytest
     # - ruff check .
+
+  # Number of self-review/fix cycles before creating PR (default: 2, 0 to disable)
+  # max_review_fix_cycles: 2
 
 # Test session settings - for `clover test` command
 test:

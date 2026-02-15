@@ -275,6 +275,124 @@ class Orchestrator:
 
         return has_fix_label and has_reviewed_label
 
+    async def _ensure_committed(
+        self,
+        worktree_path: Path,
+        context: str,
+        agent: Optional[AgentContext] = None,
+        fatal: bool = False,
+    ) -> bool:
+        """Ensure all changes in a worktree are committed.
+
+        Checks for uncommitted changes and asks Claude to commit them.
+        If fatal=True and changes remain after retry, raises ClaudeRunnerError.
+
+        Args:
+            worktree_path: Path to the worktree.
+            context: Human-readable context for log messages.
+            agent: Optional TUI agent for output tracking.
+            fatal: If True, raise on failure instead of just warning.
+
+        Returns:
+            True if worktree should be preserved for inspection
+            (fatal failure occurred).
+
+        Raises:
+            ClaudeRunnerError: If fatal=True and commit retry fails.
+        """
+        has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree_path)
+        if not has_uncommitted:
+            return False
+
+        uncommitted_status = await self.worktrees.get_uncommitted_status(worktree_path)
+        logger.warning(
+            f"{context}: Claude left uncommitted changes, "
+            f"retrying with commit instructions. Files:\n{uncommitted_status}"
+        )
+
+        on_output = self.display.get_output_callback(agent) if agent else None
+        commit_result = await self.claude.commit_uncommitted_changes(
+            uncommitted_status=uncommitted_status,
+            context=context,
+            cwd=worktree_path,
+            on_output=on_output,
+        )
+
+        logger.info(
+            f"{context}: Commit retry completed. "
+            f"Success={commit_result.success}, exit_code={commit_result.exit_code}, "
+            f"duration={commit_result.duration_seconds:.1f}s"
+        )
+        if not commit_result.success:
+            logger.warning(
+                f"{context}: Commit retry output: {commit_result.output[:500]}"
+            )
+
+        still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree_path)
+        if still_uncommitted and fatal:
+            final_status = await self.worktrees.get_uncommitted_status(worktree_path)
+            logger.error(
+                f"{context}: Still has uncommitted changes after retry! "
+                f"Files:\n{final_status}"
+            )
+            raise ClaudeRunnerError(
+                f"Claude failed to commit changes after retry. "
+                f"Worktree preserved for inspection. "
+                f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
+            )
+
+        return False
+
+    async def _run_tests_with_retry(
+        self,
+        worktree_path: Path,
+        context: str,
+        agent: Optional[AgentContext] = None,
+    ) -> None:
+        """Run review commands with retry on failure.
+
+        Runs configured review commands. If they fail, asks Claude to fix
+        and retries up to 2 more times.
+
+        Args:
+            worktree_path: Path to the worktree.
+            context: Human-readable context for log messages.
+            agent: Optional TUI agent for output tracking.
+        """
+        if not self.config.review_commands:
+            return
+
+        max_test_retries = 2
+        for attempt in range(max_test_retries + 1):
+            tests_passed, test_output = await self.claude.run_checks(
+                commands=self.config.review_commands,
+                cwd=worktree_path,
+            )
+
+            if tests_passed:
+                logger.info("All tests passed")
+                break
+
+            if attempt < max_test_retries:
+                logger.warning(
+                    f"Tests failed (attempt {attempt + 1}/{max_test_retries + 1}), "
+                    "asking Claude to fix..."
+                )
+                on_output = self.display.get_output_callback(agent) if agent else None
+                await self.claude.fix_failing_tests(
+                    test_output=test_output,
+                    context=context,
+                    cwd=worktree_path,
+                    on_output=on_output,
+                )
+                await self._ensure_committed(
+                    worktree_path,
+                    f"{context} (test fix)",
+                    agent=agent,
+                )
+            else:
+                logger.error("Tests still failing after retries")
+
     async def _process_issue(self, issue: Issue) -> None:
         """Process an issue by implementing it.
 
@@ -361,49 +479,14 @@ class Orchestrator:
                 raise ClaudeRunnerError(f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}")
 
             # Check if there are uncommitted changes (Claude made changes but didn't commit)
-            has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-
-            if has_uncommitted:
-                # Claude made changes but didn't commit them - retry with commit instructions
-                uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
-                logger.warning(
-                    f"Issue #{issue.number}: Claude left uncommitted changes, "
-                    f"retrying with commit instructions. Files:\n{uncommitted_status}"
+            context = f"issue #{issue.number}: {issue.title}"
+            try:
+                await self._ensure_committed(
+                    worktree.path, context, agent=agent, fatal=True,
                 )
-
-                on_output = self.display.get_output_callback(agent) if agent else None
-                commit_result = await self.claude.commit_uncommitted_changes(
-                    uncommitted_status=uncommitted_status,
-                    context=f"issue #{issue.number}: {issue.title}",
-                    cwd=worktree.path,
-                    on_output=on_output,
-                )
-
-                logger.info(
-                    f"Issue #{issue.number}: Commit retry completed. "
-                    f"Success={commit_result.success}, exit_code={commit_result.exit_code}, "
-                    f"duration={commit_result.duration_seconds:.1f}s"
-                )
-                if not commit_result.success:
-                    logger.warning(
-                        f"Issue #{issue.number}: Commit retry output: {commit_result.output[:500]}"
-                    )
-
-                # Check again if there are still uncommitted changes
-                still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-                if still_uncommitted:
-                    # Still uncommitted after retry - this is a fatal error
-                    final_status = await self.worktrees.get_uncommitted_status(worktree.path)
-                    logger.error(
-                        f"Issue #{issue.number}: Still has uncommitted changes after retry! "
-                        f"Files:\n{final_status}"
-                    )
-                    worktree = None  # Prevent cleanup so user can inspect
-                    raise ClaudeRunnerError(
-                        f"Claude failed to commit changes after retry. "
-                        f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
-                    )
+            except ClaudeRunnerError:
+                worktree = None  # Prevent cleanup so user can inspect
+                raise
 
             # Pre-PR review-fix cycles
             if self.config.max_review_fix_cycles > 0:
@@ -452,24 +535,11 @@ class Orchestrator:
                         break
 
                     # Handle uncommitted changes after fix
-                    has_uncommitted = await self.worktrees.has_uncommitted_changes(
-                        worktree.path
+                    await self._ensure_committed(
+                        worktree.path,
+                        f"{context} (review fix)",
+                        agent=agent,
                     )
-                    if has_uncommitted:
-                        uncommitted_status = await self.worktrees.get_uncommitted_status(
-                            worktree.path
-                        )
-                        logger.warning(
-                            f"Issue #{issue.number}: Review fix left uncommitted changes, "
-                            f"retrying commit. Files:\n{uncommitted_status}"
-                        )
-                        on_output = self.display.get_output_callback(agent) if agent else None
-                        await self.claude.commit_uncommitted_changes(
-                            uncommitted_status=uncommitted_status,
-                            context=f"issue #{issue.number}: {issue.title} (review fix)",
-                            cwd=worktree.path,
-                            on_output=on_output,
-                        )
 
                     # Early exit: if fix made no new commits, no point continuing
                     commits_after = await self.worktrees.get_commit_count(
@@ -483,53 +553,7 @@ class Orchestrator:
                         break
 
             # Run tests if configured
-            if self.config.review_commands:
-                max_test_retries = 2
-                for attempt in range(max_test_retries + 1):
-                    tests_passed, test_output = await self.claude.run_checks(
-                        commands=self.config.review_commands,
-                        cwd=worktree.path,
-                    )
-
-                    if tests_passed:
-                        logger.info("All tests passed")
-                        break
-
-                    if attempt < max_test_retries:
-                        logger.warning(
-                            f"Tests failed (attempt {attempt + 1}/{max_test_retries + 1}), "
-                            "asking Claude to fix..."
-                        )
-                        on_output = self.display.get_output_callback(agent) if agent else None
-                        await self.claude.fix_failing_tests(
-                            test_output=test_output,
-                            context=f"issue #{issue.number}: {issue.title}",
-                            cwd=worktree.path,
-                            on_output=on_output,
-                        )
-                        # Check for uncommitted changes after fix attempt
-                        has_uncommitted = await self.worktrees.has_uncommitted_changes(
-                            worktree.path
-                        )
-                        if has_uncommitted:
-                            uncommitted_status = await self.worktrees.get_uncommitted_status(
-                                worktree.path
-                            )
-                            logger.warning(
-                                f"Issue #{issue.number}: Test fix left uncommitted changes, "
-                                f"retrying commit. Files:\n{uncommitted_status}"
-                            )
-                            on_output = self.display.get_output_callback(agent) if agent else None
-                            await self.claude.commit_uncommitted_changes(
-                                uncommitted_status=uncommitted_status,
-                                context=f"issue #{issue.number}: {issue.title} (test fix)",
-                                cwd=worktree.path,
-                                on_output=on_output,
-                            )
-                    else:
-                        logger.error("Tests still failing after retries")
-                        # Post comment about test failures, but continue to create PR
-                        # (reviewer can see the failing tests)
+            await self._run_tests_with_retry(worktree.path, context, agent=agent)
 
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
@@ -869,98 +893,17 @@ class Orchestrator:
                 )
 
             # Check if there are uncommitted changes (Claude made changes but didn't commit)
-            has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-
-            if has_uncommitted:
-                # Claude made changes but didn't commit them - retry with commit instructions
-                uncommitted_status = await self.worktrees.get_uncommitted_status(worktree.path)
-                logger.warning(
-                    f"PR #{pr.number}: Claude left uncommitted changes, "
-                    f"retrying with commit instructions. Files:\n{uncommitted_status}"
+            context = f"PR #{pr.number} review fixes: {pr.title}"
+            try:
+                await self._ensure_committed(
+                    worktree.path, context, agent=agent, fatal=True,
                 )
-
-                on_output = self.display.get_output_callback(agent) if agent else None
-                commit_result = await self.claude.commit_uncommitted_changes(
-                    uncommitted_status=uncommitted_status,
-                    context=f"PR #{pr.number} review fixes: {pr.title}",
-                    cwd=worktree.path,
-                    on_output=on_output,
-                )
-
-                logger.info(
-                    f"PR #{pr.number}: Commit retry completed. "
-                    f"Success={commit_result.success}, exit_code={commit_result.exit_code}, "
-                    f"duration={commit_result.duration_seconds:.1f}s"
-                )
-                if not commit_result.success:
-                    logger.warning(
-                        f"PR #{pr.number}: Commit retry output: {commit_result.output[:500]}"
-                    )
-
-                # Check again if there are still uncommitted changes
-                still_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-                if still_uncommitted:
-                    # Still uncommitted after retry - this is a fatal error
-                    final_status = await self.worktrees.get_uncommitted_status(worktree.path)
-                    logger.error(
-                        f"PR #{pr.number}: Still has uncommitted changes after retry! "
-                        f"Files:\n{final_status}"
-                    )
-                    worktree = None  # Prevent cleanup so user can inspect
-                    raise ClaudeRunnerError(
-                        f"Claude failed to commit changes after retry. "
-                        f"Worktree preserved for inspection. "
-                        f"Uncommitted files:\n{final_status[:GITHUB_COMMENT_MAX_BODY]}"
-                    )
+            except ClaudeRunnerError:
+                worktree = None  # Prevent cleanup so user can inspect
+                raise
 
             # Run tests if configured
-            if self.config.review_commands:
-                max_test_retries = 2
-                for attempt in range(max_test_retries + 1):
-                    tests_passed, test_output = await self.claude.run_checks(
-                        commands=self.config.review_commands,
-                        cwd=worktree.path,
-                    )
-
-                    if tests_passed:
-                        logger.info("All tests passed")
-                        break
-
-                    if attempt < max_test_retries:
-                        logger.warning(
-                            f"Tests failed (attempt {attempt + 1}/{max_test_retries + 1}), "
-                            "asking Claude to fix..."
-                        )
-                        on_output = self.display.get_output_callback(agent) if agent else None
-                        await self.claude.fix_failing_tests(
-                            test_output=test_output,
-                            context=f"PR #{pr.number} review fixes: {pr.title}",
-                            cwd=worktree.path,
-                            on_output=on_output,
-                        )
-                        # Check for uncommitted changes after fix attempt
-                        has_uncommitted = await self.worktrees.has_uncommitted_changes(
-                            worktree.path
-                        )
-                        if has_uncommitted:
-                            uncommitted_status = await self.worktrees.get_uncommitted_status(
-                                worktree.path
-                            )
-                            logger.warning(
-                                f"PR #{pr.number}: Test fix left uncommitted changes, "
-                                f"retrying commit. Files:\n{uncommitted_status}"
-                            )
-                            on_output = self.display.get_output_callback(agent) if agent else None
-                            await self.claude.commit_uncommitted_changes(
-                                uncommitted_status=uncommitted_status,
-                                context=f"PR #{pr.number}: {pr.title} (test fix)",
-                                cwd=worktree.path,
-                                on_output=on_output,
-                            )
-                    else:
-                        logger.error("Tests still failing after retries")
-                        # Post comment about test failures, but continue to push
-                        # (reviewer can see the failing tests)
+            await self._run_tests_with_retry(worktree.path, context, agent=agent)
 
             # Check if there are any commits to push
             has_commits = await self.worktrees.has_commits_ahead(
@@ -1056,25 +999,12 @@ class Orchestrator:
                 self.display.refresh()
 
 
-def get_repo_path(args: argparse.Namespace) -> Optional[Path]:
-    """Get repo path from args, if specified.
-
-    Args:
-        args: Parsed command line arguments.
-
-    Returns:
-        Path to repository, or None for current directory.
-    """
-    if hasattr(args, "repo") and args.repo:
-        return Path(args.repo)
-    return None
-
-
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
     # Load config
     try:
-        config = load_config(get_repo_path(args))
+        repo_path = Path(args.repo) if hasattr(args, "repo") and args.repo else None
+        config = load_config(repo_path)
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return 1

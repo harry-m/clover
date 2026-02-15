@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -147,7 +147,7 @@ class TestState:
             state = State(state_file)
 
             # Create an item with old started_at
-            old_time = (datetime.utcnow() - timedelta(hours=25)).isoformat()
+            old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
             state.work_items["issue:42"] = WorkItem(
                 item_type=WorkItemType.ISSUE,
                 number=42,

@@ -12,6 +12,10 @@ from typing import Any, Optional
 import yaml
 
 
+# Bundled prompts directory (shipped with Clover)
+BUNDLED_PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
 @dataclass
 class TestConfig:
     """Configuration for test sessions."""
@@ -52,7 +56,7 @@ class Config:
     max_concurrent: int = 2
 
     # State file location
-    state_file: Path = field(default_factory=lambda: Path("./.clover-state.json"))
+    state_file: Path = field(default_factory=lambda: Path(".clover-state.json"))
 
     # Claude settings
     max_turns: int = 50
@@ -60,10 +64,12 @@ class Config:
     # Review checks (list of commands to run during PR review)
     review_commands: list[str] = field(default_factory=list)
 
-    # Prompts directory
-    prompts_dir: Path = field(
-        default_factory=lambda: Path(__file__).parent / "prompts"
-    )
+    # Bundled prompts directory (shipped with Clover)
+    prompts_dir: Path = field(default_factory=lambda: BUNDLED_PROMPTS_DIR)
+
+    # User config directory (~/.clover/<owner>/<repo>/)
+    # Used for user prompt overrides and state
+    user_config_dir: Optional[Path] = None
 
     # Test session settings
     test: TestConfig = field(default_factory=TestConfig)
@@ -88,6 +94,24 @@ class Config:
     def repo_name(self) -> str:
         """Extract repo name from github_repo."""
         return self.github_repo.split("/")[1]
+
+    def get_prompt_file(self, name: str) -> Path:
+        """Get the path to a prompt file, checking user overrides first.
+
+        User prompts in ~/.clover/<owner>/<repo>/prompts/ take precedence
+        over the bundled defaults.
+
+        Args:
+            name: Prompt filename (e.g., "implement.md").
+
+        Returns:
+            Path to the prompt file.
+        """
+        if self.user_config_dir:
+            user_prompt = self.user_config_dir / "prompts" / name
+            if user_prompt.exists():
+                return user_prompt
+        return self.prompts_dir / name
 
     @classmethod
     def from_yaml(cls, yaml_path: Path, repo_path: Optional[Path] = None) -> Config:
@@ -134,11 +158,14 @@ class Config:
         if "/" not in github_repo:
             raise ValueError("github.repo must be in format 'owner/repo'")
 
-        # Determine repo path
+        # Determine repo path (where the git repo lives)
         if repo_path is None:
-            repo_path = yaml_path.parent.resolve()
+            repo_path = Path.cwd().resolve()
         else:
             repo_path = repo_path.resolve()
+
+        # User config directory (where the yaml lives)
+        user_config_dir = yaml_path.parent.resolve()
 
         # Optional settings with defaults
         poll_interval = daemon.get("poll_interval", 60)
@@ -147,9 +174,14 @@ class Config:
         clover_label = github.get("label", "clover")
         base_branch = github.get("base_branch")  # None means auto-detect
         max_concurrent = daemon.get("max_concurrent", 2)
-        state_file_str = daemon.get("state_file", "./.orchestrator-state.json")
-        state_file = Path(state_file_str)
         max_turns = daemon.get("max_turns", 50)
+
+        # State file defaults to user config dir
+        state_file_str = daemon.get("state_file")
+        if state_file_str:
+            state_file = Path(state_file_str)
+        else:
+            state_file = user_config_dir / "state.json"
 
         # Review commands
         review_commands = review.get("commands", [])
@@ -181,6 +213,7 @@ class Config:
             state_file=state_file,
             max_turns=max_turns,
             review_commands=review_commands,
+            user_config_dir=user_config_dir,
             test=test,
             setup_script=setup_script,
             claude_command=claude_command,
@@ -230,35 +263,81 @@ def _get_gh_token() -> Optional[str]:
     return None
 
 
-def find_config_file(start_path: Optional[Path] = None) -> Optional[Path]:
-    """Find clover.yaml by searching up from start_path.
+def detect_github_repo(repo_path: Optional[Path] = None) -> Optional[str]:
+    """Detect the GitHub owner/repo from a git remote URL.
+
+    Parses the origin remote URL to extract the owner/repo slug.
 
     Args:
-        start_path: Directory to start searching from. Defaults to cwd.
+        repo_path: Path to the git repository. Defaults to cwd.
+
+    Returns:
+        "owner/repo" string, or None if detection fails.
+    """
+    if repo_path is None:
+        repo_path = Path.cwd()
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            remote_url = result.stdout.strip()
+            match = re.search(
+                r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote_url
+            )
+            if match:
+                return f"{match.group(1)}/{match.group(2)}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def get_clover_dir(github_repo: str) -> Path:
+    """Get the Clover config directory for a given repo.
+
+    Returns:
+        Path like ~/.clover/<owner>/<repo>/
+    """
+    owner, repo = github_repo.split("/", 1)
+    return Path.home() / ".clover" / owner / repo
+
+
+def find_config_file(repo_path: Optional[Path] = None) -> Optional[Path]:
+    """Find clover.yaml for the current repository.
+
+    Detects the GitHub repo from the git remote in repo_path (or cwd),
+    then looks for config at ~/.clover/<owner>/<repo>/clover.yaml.
+
+    Args:
+        repo_path: Path to the git repository. Defaults to cwd.
 
     Returns:
         Path to clover.yaml if found, None otherwise.
     """
-    if start_path is None:
-        start_path = Path.cwd()
+    if repo_path is None:
+        repo_path = Path.cwd()
 
-    current = start_path.resolve()
+    github_repo = detect_github_repo(repo_path)
+    if not github_repo:
+        return None
 
-    # Search up to root
-    while current != current.parent:
-        config_path = current / "clover.yaml"
-        if config_path.exists():
-            return config_path
-        current = current.parent
-
+    config_dir = get_clover_dir(github_repo)
+    config_path = config_dir / "clover.yaml"
+    if config_path.exists():
+        return config_path
     return None
 
 
 def load_config(repo_path: Optional[Path] = None) -> Config:
     """Load configuration from clover.yaml.
 
-    Searches for clover.yaml in the repo_path or current directory,
-    then walks up the directory tree.
+    Detects the GitHub repo from the git remote, then loads config
+    from ~/.clover/<owner>/<repo>/clover.yaml.
 
     Args:
         repo_path: Optional path to the repository root.
@@ -267,15 +346,25 @@ def load_config(repo_path: Optional[Path] = None) -> Config:
         Config instance.
 
     Raises:
-        ValueError: If clover.yaml is not found or invalid.
+        ValueError: If config not found, repo not detected, or config invalid.
     """
-    search_start = repo_path or Path.cwd()
-    config_path = find_config_file(search_start)
+    repo_path = (repo_path or Path.cwd()).resolve()
 
-    if config_path is None:
+    github_repo = detect_github_repo(repo_path)
+    if not github_repo:
         raise ValueError(
-            f"clover.yaml not found in {search_start} or any parent directory. "
-            "Create a clover.yaml file in your repository root."
+            f"Could not detect GitHub repository from git remote in {repo_path}. "
+            "Make sure you're in a git repository with an 'origin' remote "
+            "pointing to GitHub."
+        )
+
+    config_dir = get_clover_dir(github_repo)
+    config_path = config_dir / "clover.yaml"
+
+    if not config_path.exists():
+        raise ValueError(
+            f"No Clover configuration found at {config_path}. "
+            f"Run 'clover init' in your repository to set up Clover."
         )
 
     return Config.from_yaml(config_path, repo_path=repo_path)

@@ -13,7 +13,7 @@ NO_OUTPUT_SENTINEL = ""
 
 
 def format_output(
-    output: str,
+    output: Optional[str],
     fallback_generator: Optional[Callable[[], str]] = None,
     context: str = "output",
     work_type: Optional[str] = None,
