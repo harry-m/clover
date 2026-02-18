@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Optional
 
 from .agent_context import AgentContext
-from .claude_runner import ClaudeRunner, ClaudeRunnerError
+from .claude_runner import ClaudeRunner, ClaudeRunnerError, TransientClaudeError
 from .config import Config, load_config
 from .github_watcher import GitHubWatcher, Issue, PullRequest
 from .output_utils import format_output, format_commit_log_as_summary
-from .state import State, WorkItemType
+from .state import State, WorkItemStatus, WorkItemType
 from .tui import CloverDisplay, is_tty
 from .worktree_manager import WorktreeManager
 
@@ -194,9 +194,38 @@ class Orchestrator:
         in_progress = self.state.get_in_progress_count()
         available_slots = self.config.max_concurrent - in_progress
 
+        # Retry paused items that are ready before picking up new work
+        ready_paused = self.state.get_ready_paused_items()
+        for item in ready_paused:
+            if available_slots <= 0:
+                break
+            # Transition to IN_PROGRESS so it holds a concurrency slot
+            self.state.mark_in_progress(
+                item.item_type,
+                item.number,
+                worktree_path=item.worktree_path,
+                branch_name=item.branch_name,
+            )
+            # Preserve retry metadata on the newly in-progress item
+            current = self.state.get_item(item.item_type, item.number)
+            if current:
+                current.retry_count = item.retry_count
+                current.pause_comment_posted = item.pause_comment_posted
+                self.state._dirty = True
+                self.state._save()
+
+            self._log(
+                f"Retrying paused {item.item_type.value} #{item.number} "
+                f"(attempt {item.retry_count})"
+            )
+            task = asyncio.create_task(self._retry_paused_item(item))
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
+            available_slots -= 1
+
         if available_slots <= 0:
             logger.debug(
-                f"At concurrency limit ({in_progress}/{self.config.max_concurrent})"
+                f"At concurrency limit ({self.config.max_concurrent}/{self.config.max_concurrent})"
             )
             return
 
@@ -274,6 +303,110 @@ class Orchestrator:
             return False
 
         return has_fix_label and has_reviewed_label
+
+    def _is_transient_error(self, error: Exception) -> bool:
+        """Classify whether an error is transient (retryable).
+
+        Returns True for errors that happen during or after Claude
+        invocation (usage limits, crashes, timeouts). Returns False
+        for setup errors (worktree, git, missing files).
+
+        Args:
+            error: The exception to classify.
+
+        Returns:
+            True if the error is transient and retryable.
+        """
+        if isinstance(error, TransientClaudeError):
+            return True
+
+        if isinstance(error, ClaudeRunnerError):
+            msg = str(error).lower()
+            transient_patterns = [
+                "timed out",
+                "implementation failed",
+                "review implementation failed",
+                "failed to run claude",
+            ]
+            return any(pattern in msg for pattern in transient_patterns)
+
+        return False
+
+    async def _handle_failure(
+        self,
+        item_type: WorkItemType,
+        number: int,
+        error: Exception,
+        agent: Optional[AgentContext],
+        retry_count: int = 0,
+        pause_comment_posted: bool = False,
+    ) -> None:
+        """Handle a work item failure, pausing if transient or failing permanently.
+
+        Args:
+            item_type: Type of work item.
+            number: Issue or PR number.
+            error: The exception that caused the failure.
+            agent: Optional TUI agent context.
+            retry_count: Current retry count (from previous pauses).
+            pause_comment_posted: Whether a pause comment was already posted.
+        """
+        if self._is_transient_error(error):
+            paused_item = self.state.mark_paused(
+                item_type,
+                number,
+                str(error),
+                backoff_schedule=self.config.retry_backoff,
+            )
+
+            if paused_item is not None:
+                # Successfully paused for retry
+                if agent:
+                    agent.mark_paused(str(error)[:100])
+
+                if not pause_comment_posted:
+                    paused_item.pause_comment_posted = True
+                    self.state._dirty = True
+                    self.state._save()
+                    try:
+                        await self.github.post_comment(
+                            number,
+                            f"⏸️ Work paused due to a transient error. "
+                            f"Will retry automatically at "
+                            f"`{paused_item.next_retry_at}`.\n\n"
+                            f"Error: {str(error)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                            f"*— Clover, the Claude Overseer*",
+                        )
+                    except Exception:
+                        pass
+
+                self._log(
+                    f"Paused {item_type.value} #{number} "
+                    f"(retry {paused_item.retry_count})"
+                )
+                return
+
+            # max retries exceeded — fall through to permanent failure
+            logger.warning(
+                f"Max retries exceeded for {item_type.value} #{number}, "
+                "marking as permanently failed"
+            )
+
+        # Permanent failure
+        self.state.mark_failed(item_type, number, str(error))
+        if agent:
+            agent.mark_failed()
+            agent.add_output(f"Error: {str(error)[:100]}")
+
+        try:
+            await self.github.post_comment(
+                number,
+                f"❌ Failed to process this item.\n\n"
+                f"Error: {str(error)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                f"*— Clover, the Claude Overseer*",
+            )
+        except Exception:
+            pass
 
     async def _ensure_committed(
         self,
@@ -393,11 +526,80 @@ class Orchestrator:
             else:
                 logger.error("Tests still failing after retries")
 
-    async def _process_issue(self, issue: Issue) -> None:
+    async def _retry_paused_item(self, item) -> None:
+        """Retry a previously paused work item.
+
+        Args:
+            item: The paused WorkItem to retry.
+        """
+        retry_count = item.retry_count
+        pause_comment_posted = item.pause_comment_posted
+
+        try:
+            if item.item_type == WorkItemType.ISSUE:
+                issue = await self.github.get_issue(item.number)
+                if issue is None or self.config.clover_label not in issue.labels:
+                    logger.info(
+                        f"Issue #{item.number} no longer eligible, "
+                        "clearing from state"
+                    )
+                    self.state.clear_item(item.item_type, item.number)
+                    return
+                await self._process_issue(
+                    issue,
+                    retry_count=retry_count,
+                    pause_comment_posted=pause_comment_posted,
+                )
+            elif item.item_type == WorkItemType.PR_REVIEW:
+                pr = await self.github.get_pr(item.number)
+                if pr is None or not self._should_review_pr(pr):
+                    logger.info(
+                        f"PR #{item.number} no longer eligible for review, "
+                        "clearing from state"
+                    )
+                    self.state.clear_item(item.item_type, item.number)
+                    return
+                await self._process_pr_review(
+                    pr,
+                    retry_count=retry_count,
+                    pause_comment_posted=pause_comment_posted,
+                )
+            elif item.item_type == WorkItemType.PR_FIX:
+                pr = await self.github.get_pr(item.number)
+                if pr is None or not self._should_fix_pr(pr):
+                    logger.info(
+                        f"PR #{item.number} no longer eligible for fix, "
+                        "clearing from state"
+                    )
+                    self.state.clear_item(item.item_type, item.number)
+                    return
+                await self._process_pr_fix(
+                    pr,
+                    retry_count=retry_count,
+                    pause_comment_posted=pause_comment_posted,
+                )
+            else:
+                logger.warning(
+                    f"Unknown item type for retry: {item.item_type}"
+                )
+                self.state.clear_item(item.item_type, item.number)
+        except Exception as e:
+            logger.error(
+                f"Error retrying {item.item_type.value} #{item.number}: {e}"
+            )
+
+    async def _process_issue(
+        self,
+        issue: Issue,
+        retry_count: int = 0,
+        pause_comment_posted: bool = False,
+    ) -> None:
         """Process an issue by implementing it.
 
         Args:
             issue: Issue to implement.
+            retry_count: Current retry count (for pause/resume tracking).
+            pause_comment_posted: Whether a pause comment was already posted.
         """
         branch_name = f"clover/issue-{issue.number}"
         worktree = None
@@ -477,6 +679,17 @@ class Orchestrator:
 
             if not result.success:
                 raise ClaudeRunnerError(f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}")
+
+            # Post resume comment if this was a retry
+            if retry_count > 0:
+                try:
+                    await self.github.post_comment(
+                        issue.number,
+                        "▶️ Work has resumed after transient failure.\n\n"
+                        "*— Clover, the Claude Overseer*",
+                    )
+                except Exception:
+                    pass
 
             # Check if there are uncommitted changes (Claude made changes but didn't commit)
             context = f"issue #{issue.number}: {issue.title}"
@@ -658,45 +871,52 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Failed to process issue #{issue.number}: {e}")
-            self.state.mark_failed(WorkItemType.ISSUE, issue.number, str(e))
-            if agent:
-                agent.mark_failed()
-                agent.add_output(f"Error: {str(e)[:100]}")
-
-            # Post error comment on issue
-            try:
-                await self.github.post_comment(
-                    issue.number,
-                    f"❌ Failed to implement this issue automatically.\n\n"
-                    f"Error: {str(e)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-            except Exception:
-                pass
+            await self._handle_failure(
+                WorkItemType.ISSUE,
+                issue.number,
+                e,
+                agent,
+                retry_count=retry_count,
+                pause_comment_posted=pause_comment_posted,
+            )
 
         finally:
-            # Cleanup worktree (but preserve if there are uncommitted changes)
+            # Cleanup worktree (but preserve if paused or has uncommitted changes)
             if worktree:
                 try:
-                    has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-                    if has_uncommitted:
-                        logger.warning(
-                            f"Preserving worktree at {worktree.path} for inspection "
-                            f"(has uncommitted changes)"
+                    item = self.state.get_item(WorkItemType.ISSUE, issue.number)
+                    if item and item.status == WorkItemStatus.PAUSED:
+                        logger.info(
+                            f"Preserving worktree at {worktree.path} "
+                            f"(item is paused for retry)"
                         )
                     else:
-                        await self.worktrees.cleanup_worktree(worktree.path)
+                        has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                        if has_uncommitted:
+                            logger.warning(
+                                f"Preserving worktree at {worktree.path} for inspection "
+                                f"(has uncommitted changes)"
+                            )
+                        else:
+                            await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
             # Refresh display
             if self.display:
                 self.display.refresh()
 
-    async def _process_pr_review(self, pr: PullRequest) -> None:
+    async def _process_pr_review(
+        self,
+        pr: PullRequest,
+        retry_count: int = 0,
+        pause_comment_posted: bool = False,
+    ) -> None:
         """Process a PR by reviewing it.
 
         Args:
             pr: PR to review.
+            retry_count: Current retry count (for pause/resume tracking).
+            pause_comment_posted: Whether a pause comment was already posted.
         """
         worktree = None
         agent: Optional[AgentContext] = None
@@ -748,6 +968,17 @@ class Orchestrator:
                 on_output=on_output,
             )
 
+            # Post resume comment if this was a retry
+            if retry_count > 0:
+                try:
+                    await self.github.post_comment(
+                        pr.number,
+                        "▶️ Work has resumed after transient failure.\n\n"
+                        "*— Clover, the Claude Overseer*",
+                    )
+                except Exception:
+                    pass
+
             # Format review output with fallback
             review_output = format_output(
                 result.output,
@@ -784,27 +1015,45 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Failed to review PR #{pr.number}: {e}")
-            self.state.mark_failed(WorkItemType.PR_REVIEW, pr.number, str(e))
-            if agent:
-                agent.mark_failed()
-                agent.add_output(f"Error: {str(e)[:100]}")
+            await self._handle_failure(
+                WorkItemType.PR_REVIEW,
+                pr.number,
+                e,
+                agent,
+                retry_count=retry_count,
+                pause_comment_posted=pause_comment_posted,
+            )
 
         finally:
             # Cleanup worktree
             if worktree:
                 try:
-                    await self.worktrees.cleanup_worktree(worktree.path)
+                    item = self.state.get_item(WorkItemType.PR_REVIEW, pr.number)
+                    if item and item.status == WorkItemStatus.PAUSED:
+                        logger.info(
+                            f"Preserving worktree at {worktree.path} "
+                            f"(item is paused for retry)"
+                        )
+                    else:
+                        await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
             # Refresh display
             if self.display:
                 self.display.refresh()
 
-    async def _process_pr_fix(self, pr: PullRequest) -> None:
+    async def _process_pr_fix(
+        self,
+        pr: PullRequest,
+        retry_count: int = 0,
+        pause_comment_posted: bool = False,
+    ) -> None:
         """Implement review suggestions for a PR.
 
         Args:
             pr: PR to fix.
+            retry_count: Current retry count (for pause/resume tracking).
+            pause_comment_posted: Whether a pause comment was already posted.
         """
         worktree = None
         agent: Optional[AgentContext] = None
@@ -892,6 +1141,17 @@ class Orchestrator:
                     f"Review implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}"
                 )
 
+            # Post resume comment if this was a retry
+            if retry_count > 0:
+                try:
+                    await self.github.post_comment(
+                        pr.number,
+                        "▶️ Work has resumed after transient failure.\n\n"
+                        "*— Clover, the Claude Overseer*",
+                    )
+                except Exception:
+                    pass
+
             # Check if there are uncommitted changes (Claude made changes but didn't commit)
             context = f"PR #{pr.number} review fixes: {pr.title}"
             try:
@@ -964,34 +1224,34 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Failed to implement fixes for PR #{pr.number}: {e}")
-            self.state.mark_failed(WorkItemType.PR_FIX, pr.number, str(e))
-            if agent:
-                agent.mark_failed()
-                agent.add_output(f"Error: {str(e)[:100]}")
-
-            # Post error comment on PR
-            try:
-                await self.github.post_comment(
-                    pr.number,
-                    f"❌ Failed to implement review suggestions.\n\n"
-                    f"Error: {str(e)[:GITHUB_COMMENT_MAX_BODY]}\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-            except Exception:
-                pass
+            await self._handle_failure(
+                WorkItemType.PR_FIX,
+                pr.number,
+                e,
+                agent,
+                retry_count=retry_count,
+                pause_comment_posted=pause_comment_posted,
+            )
 
         finally:
-            # Cleanup worktree (but preserve if there are uncommitted changes)
+            # Cleanup worktree (but preserve if paused or has uncommitted changes)
             if worktree:
                 try:
-                    has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
-                    if has_uncommitted:
-                        logger.warning(
-                            f"Preserving worktree at {worktree.path} for inspection "
-                            f"(has uncommitted changes)"
+                    item = self.state.get_item(WorkItemType.PR_FIX, pr.number)
+                    if item and item.status == WorkItemStatus.PAUSED:
+                        logger.info(
+                            f"Preserving worktree at {worktree.path} "
+                            f"(item is paused for retry)"
                         )
                     else:
-                        await self.worktrees.cleanup_worktree(worktree.path)
+                        has_uncommitted = await self.worktrees.has_uncommitted_changes(worktree.path)
+                        if has_uncommitted:
+                            logger.warning(
+                                f"Preserving worktree at {worktree.path} for inspection "
+                                f"(has uncommitted changes)"
+                            )
+                        else:
+                            await self.worktrees.cleanup_worktree(worktree.path)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup worktree: {e}")
             # Refresh display

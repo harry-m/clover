@@ -20,8 +20,9 @@ class AgentContext:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = None
     output_lines: deque[str] = field(default_factory=lambda: deque(maxlen=50))
-    status: str = "running"  # "running", "completed", "failed"
+    status: str = "running"  # "running", "completed", "failed", "paused"
     current_tool: Optional[str] = None
+    pause_reason: Optional[str] = None
 
     def add_output(self, line: str) -> None:
         """Add a line of output to the buffer."""
@@ -39,6 +40,16 @@ class AgentContext:
     def mark_failed(self) -> None:
         """Mark the agent as failed."""
         self.status = "failed"
+        self.finished_at = datetime.now(timezone.utc)
+
+    def mark_paused(self, reason: str) -> None:
+        """Mark the agent as paused for retry.
+
+        Args:
+            reason: Human-readable reason for the pause.
+        """
+        self.status = "paused"
+        self.pause_reason = reason
         self.finished_at = datetime.now(timezone.utc)
 
     def seconds_since_finished(self) -> Optional[float]:

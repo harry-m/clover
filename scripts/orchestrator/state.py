@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -31,8 +31,14 @@ class WorkItemStatus(str, Enum):
 
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+# Default backoff schedule for transient failures (in seconds):
+# 5min, 30min, 2hr, 8hr, 24hr
+DEFAULT_RETRY_BACKOFF = [300, 1800, 7200, 28800, 86400]
 
 
 @dataclass
@@ -50,6 +56,10 @@ class WorkItem:
     # For issues: the PR number that was created
     # For PR reviews: the issue number this PR addresses
     related_number: Optional[int] = None
+    # Retry tracking for paused items
+    retry_count: int = 0
+    next_retry_at: Optional[str] = None
+    pause_comment_posted: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -63,6 +73,9 @@ class WorkItem:
             "completed_at": self.completed_at,
             "error_message": self.error_message,
             "related_number": self.related_number,
+            "retry_count": self.retry_count,
+            "next_retry_at": self.next_retry_at,
+            "pause_comment_posted": self.pause_comment_posted,
         }
 
     @classmethod
@@ -78,6 +91,9 @@ class WorkItem:
             completed_at=data.get("completed_at"),
             error_message=data.get("error_message"),
             related_number=data.get("related_number"),
+            retry_count=data.get("retry_count", 0),
+            next_retry_at=data.get("next_retry_at"),
+            pause_comment_posted=data.get("pause_comment_posted", False),
         )
 
 
@@ -153,10 +169,11 @@ class State:
         if item is None:
             return False
 
-        # Consider it "processing" if in progress, completed, or failed
-        # This prevents re-processing items (failed items need manual clearing)
+        # Consider it "processing" if in progress, paused, completed, or failed
+        # This prevents re-processing items (failed/paused items need manual clearing or retry)
         return item.status in (
             WorkItemStatus.IN_PROGRESS,
+            WorkItemStatus.PAUSED,
             WorkItemStatus.COMPLETED,
             WorkItemStatus.FAILED,
         )
@@ -244,6 +261,81 @@ class State:
         self._save()
 
         logger.warning(f"Marked {item_type.value} #{number} as failed: {error_message}")
+
+    def mark_paused(
+        self,
+        item_type: WorkItemType,
+        number: int,
+        error_message: str,
+        backoff_schedule: Optional[list[int]] = None,
+    ) -> Optional[WorkItem]:
+        """Mark an item as paused for retry later.
+
+        Args:
+            item_type: Type of work item.
+            number: Issue or PR number.
+            error_message: Description of the transient error.
+            backoff_schedule: List of backoff delays in seconds.
+                Defaults to DEFAULT_RETRY_BACKOFF.
+
+        Returns:
+            The updated WorkItem if paused successfully, or None if
+            max retries have been exceeded.
+        """
+        if backoff_schedule is None:
+            backoff_schedule = DEFAULT_RETRY_BACKOFF
+
+        key = self._make_key(item_type, number)
+        item = self.work_items.get(key)
+
+        if item is None:
+            logger.warning(f"Cannot mark unknown item {key} as paused")
+            return None
+
+        retry_count = item.retry_count + 1
+
+        if retry_count > len(backoff_schedule):
+            logger.warning(
+                f"Max retries ({len(backoff_schedule)}) exceeded for "
+                f"{item_type.value} #{number}"
+            )
+            return None
+
+        delay_seconds = backoff_schedule[retry_count - 1]
+        next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+        item.status = WorkItemStatus.PAUSED
+        item.error_message = error_message
+        item.retry_count = retry_count
+        item.next_retry_at = next_retry.isoformat()
+        self._dirty = True
+        self._save()
+
+        logger.info(
+            f"Paused {item_type.value} #{number} (retry {retry_count}/"
+            f"{len(backoff_schedule)}, next retry at {item.next_retry_at})"
+        )
+        return item
+
+    def get_ready_paused_items(self) -> list[WorkItem]:
+        """Get paused items that are ready for retry.
+
+        Returns:
+            List of paused items whose next_retry_at has passed.
+        """
+        now = datetime.now(timezone.utc)
+        ready = []
+
+        for item in self.work_items.values():
+            if item.status != WorkItemStatus.PAUSED:
+                continue
+            if item.next_retry_at is None:
+                continue
+            retry_at = datetime.fromisoformat(item.next_retry_at)
+            if retry_at <= now:
+                ready.append(item)
+
+        return ready
 
     def clear_item(self, item_type: WorkItemType, number: int) -> None:
         """Remove an item from state (allows re-processing)."""

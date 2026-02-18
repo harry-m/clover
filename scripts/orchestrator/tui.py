@@ -101,6 +101,16 @@ class CloverDisplay:
         title.append("  ")
         title.append_text(Text.from_markup(status))
 
+        # Show paused count if any
+        paused_count = sum(
+            1 for a in self.registry.get_all_agents() if a.status == "paused"
+        )
+        if paused_count:
+            title.append("  ")
+            title.append_text(
+                Text.from_markup(f"[yellow]⏸ {paused_count} paused[/yellow]")
+            )
+
         return Panel(title, style="cyan", height=3)
 
     def _render_system_log(self) -> Panel:
@@ -143,6 +153,9 @@ class CloverDisplay:
         elif agent.status == "completed":
             status_style = "blue"
             status_icon = "✓"
+        elif agent.status == "paused":
+            status_style = "yellow"
+            status_icon = "⏸"
         else:
             status_style = "red"
             status_icon = "✗"
@@ -166,7 +179,9 @@ class CloverDisplay:
         panel_height = 12
 
         content = Text()
-        if agent.output_lines:
+        if agent.status == "paused" and agent.pause_reason:
+            content.append(f"Paused: {agent.pause_reason}", style="yellow")
+        elif agent.output_lines:
             lines = list(agent.output_lines)[-num_lines:]
             content.append("\n".join(lines))
         elif agent.status == "failed":
@@ -189,7 +204,8 @@ class CloverDisplay:
         """
         visible = []
         for agent in self.registry.get_all_agents():
-            if agent.status == "running":
+            if agent.status in ("running", "paused"):
+                # Running and paused agents are always visible
                 visible.append(agent)
             else:
                 # Keep completed/failed agents visible for 30 seconds

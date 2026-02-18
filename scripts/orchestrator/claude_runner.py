@@ -67,6 +67,17 @@ class ClaudeRunnerError(Exception):
     pass
 
 
+class TransientClaudeError(ClaudeRunnerError):
+    """Transient error from Claude (usage limit, crash, timeout).
+
+    Subclass of ClaudeRunnerError so existing ``except ClaudeRunnerError``
+    handlers still catch it, but callers can distinguish transient failures
+    for retry purposes.
+    """
+
+    pass
+
+
 class ClaudeRunner:
     """Runs Claude Code processes for implementation and review tasks."""
 

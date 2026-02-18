@@ -85,6 +85,12 @@ class Config:
     # Pre-PR review-fix cycles (0 to disable)
     max_review_fix_cycles: int = 2
 
+    # Retry backoff schedule for transient failures (list of seconds)
+    # Default: 5min, 30min, 2hr, 8hr, 24hr
+    retry_backoff: list[int] = field(
+        default_factory=lambda: [300, 1800, 7200, 28800, 86400]
+    )
+
     @property
     def repo_owner(self) -> str:
         """Extract owner from github_repo."""
@@ -201,6 +207,12 @@ class Config:
         # Claude command (optional)
         claude_command = daemon.get("claude_command")
 
+        # Retry backoff schedule
+        retry_config = daemon.get("retry", {})
+        retry_backoff = retry_config.get("backoff", [300, 1800, 7200, 28800, 86400])
+        if not isinstance(retry_backoff, list):
+            raise ValueError("daemon.retry.backoff must be a list of integers")
+
         return cls(
             github_token=github_token,
             github_repo=github_repo,
@@ -218,6 +230,7 @@ class Config:
             setup_script=setup_script,
             claude_command=claude_command,
             max_review_fix_cycles=max_review_fix_cycles,
+            retry_backoff=retry_backoff,
         )
 
 

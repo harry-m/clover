@@ -187,3 +187,140 @@ class TestState:
             assert state.get_in_progress_count() == 2
             assert not state.is_in_progress(WorkItemType.ISSUE, 42)
             assert state.is_in_progress(WorkItemType.PR_REVIEW, 42)
+
+
+class TestPausedState:
+    """Tests for PAUSED status and retry logic."""
+
+    def test_mark_paused(self):
+        """Test basic pause with retry metadata."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+            item = state.mark_paused(
+                WorkItemType.ISSUE, 42, "Usage limit hit"
+            )
+
+            assert item is not None
+            assert item.status == WorkItemStatus.PAUSED
+            assert item.retry_count == 1
+            assert item.next_retry_at is not None
+            assert item.error_message == "Usage limit hit"
+
+    def test_mark_paused_max_retries(self):
+        """Test that mark_paused returns None after max retries."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            # Use a short backoff schedule
+            backoff = [1, 2]
+
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+
+            # First pause: retry_count -> 1
+            item = state.mark_paused(
+                WorkItemType.ISSUE, 42, "error 1", backoff_schedule=backoff
+            )
+            assert item is not None
+            assert item.retry_count == 1
+
+            # Second pause: retry_count -> 2
+            item = state.mark_paused(
+                WorkItemType.ISSUE, 42, "error 2", backoff_schedule=backoff
+            )
+            assert item is not None
+            assert item.retry_count == 2
+
+            # Third pause: exceeds max (2 entries in backoff)
+            item = state.mark_paused(
+                WorkItemType.ISSUE, 42, "error 3", backoff_schedule=backoff
+            )
+            assert item is None
+
+    def test_paused_is_processing(self):
+        """Test that paused items block normal re-processing."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+            state.mark_paused(WorkItemType.ISSUE, 42, "Usage limit hit")
+
+            # Should be considered "processing" so the poll doesn't re-pick it
+            assert state.is_processing(WorkItemType.ISSUE, 42)
+            # But not "in progress"
+            assert not state.is_in_progress(WorkItemType.ISSUE, 42)
+
+    def test_get_ready_paused_items(self):
+        """Test that only paused items past their next_retry_at are returned."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+            # Use very short backoff so next_retry_at is in the past
+            state.mark_paused(
+                WorkItemType.ISSUE, 42, "error", backoff_schedule=[0]
+            )
+
+            ready = state.get_ready_paused_items()
+            assert len(ready) == 1
+            assert ready[0].number == 42
+
+    def test_get_ready_paused_items_not_ready(self):
+        """Test that items with future next_retry_at are excluded."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+            # Use long backoff so next_retry_at is far in the future
+            state.mark_paused(
+                WorkItemType.ISSUE, 42, "error", backoff_schedule=[86400]
+            )
+
+            ready = state.get_ready_paused_items()
+            assert len(ready) == 0
+
+    def test_paused_persistence(self):
+        """Test that retry metadata survives save/load cycle."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+
+            # Create and pause
+            state1 = State(state_file)
+            state1.mark_in_progress(WorkItemType.ISSUE, 42)
+            state1.mark_paused(WorkItemType.ISSUE, 42, "Usage limit")
+
+            # Reload from disk
+            state2 = State(state_file)
+            item = state2.get_item(WorkItemType.ISSUE, 42)
+
+            assert item is not None
+            assert item.status == WorkItemStatus.PAUSED
+            assert item.retry_count == 1
+            assert item.next_retry_at is not None
+            assert item.error_message == "Usage limit"
+
+    def test_paused_survives_reset_in_progress(self):
+        """Test that reset_in_progress_items does NOT clear paused items."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+            state = State(state_file)
+
+            # Create one in-progress and one paused item
+            state.mark_in_progress(WorkItemType.ISSUE, 42)
+            state.mark_in_progress(WorkItemType.ISSUE, 43)
+            state.mark_paused(WorkItemType.ISSUE, 43, "Usage limit")
+
+            # Reset in-progress items (simulates daemon restart)
+            reset_count = state.reset_in_progress_items()
+
+            assert reset_count == 1  # Only #42 was reset
+            assert state.get_item(WorkItemType.ISSUE, 42) is None  # Cleared
+            item = state.get_item(WorkItemType.ISSUE, 43)
+            assert item is not None
+            assert item.status == WorkItemStatus.PAUSED  # Preserved

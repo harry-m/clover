@@ -115,12 +115,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Group items by status
     in_progress = []
+    paused = []
     completed = []
     failed = []
 
     for key, item in state.work_items.items():
         if item.status == WorkItemStatus.IN_PROGRESS:
             in_progress.append(item)
+        elif item.status == WorkItemStatus.PAUSED:
+            paused.append(item)
         elif item.status == WorkItemStatus.COMPLETED:
             completed.append(item)
         elif item.status == WorkItemStatus.FAILED:
@@ -134,6 +137,17 @@ def cmd_status(args: argparse.Namespace) -> int:
                 print(f"    Branch: {item.branch_name}")
             if item.started_at:
                 print(f"    Started: {item.started_at}")
+        print()
+
+    if paused:
+        print(f"Paused ({len(paused)}):")
+        for item in paused:
+            print(f"  - {item.item_type.value} #{item.number}")
+            print(f"    Retry: {item.retry_count}")
+            if item.error_message:
+                print(f"    Reason: {item.error_message[:100]}")
+            if item.next_retry_at:
+                print(f"    Next retry: {item.next_retry_at}")
         print()
 
     if failed:
@@ -179,7 +193,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"  ... and {len(completed) - 10} more")
         print()
 
-    if not (in_progress or completed or failed):
+    if not (in_progress or paused or completed or failed):
         print("No work items tracked yet.")
 
     return 0
@@ -364,6 +378,11 @@ daemon:
   # Setup script to run after worktree creation (optional)
   # Path relative to repo root, receives CLOVER_* env vars
   # setup_script: scripts/setup-worktree.sh
+
+  # Retry backoff schedule for transient failures (in seconds)
+  # Default: 5min, 30min, 2hr, 8hr, 24hr
+  # retry:
+  #   backoff: [300, 1800, 7200, 28800, 86400]
 
 # Review settings - commands to run during PR review
 review:
