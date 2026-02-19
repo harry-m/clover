@@ -150,10 +150,10 @@ class ClaudeRunner:
         logger.info(f"Running Claude in {cwd}")
         logger.debug(f"Command: {' '.join(cmd)}, use_stdin={use_stdin}")
 
-        try:
-            import time
-            start_time = time.time()
+        import time
+        start_time = time.time()
 
+        try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,
@@ -164,7 +164,13 @@ class ClaudeRunner:
                 # (default is 64KB which fails on large tool outputs)
                 limit=10 * 1024 * 1024,
             )
+        except FileNotFoundError:
+            raise ClaudeRunnerError(
+                "Claude CLI not found. Ensure 'claude' is in your PATH "
+                "and you have authenticated with 'claude' first."
+            )
 
+        try:
             # Send prompt via stdin if needed
             if use_stdin:
                 proc.stdin.write(prompt.encode())
@@ -389,11 +395,6 @@ class ClaudeRunner:
                 duration_seconds=duration,
             )
 
-        except FileNotFoundError:
-            raise ClaudeRunnerError(
-                "Claude CLI not found. Ensure 'claude' is in your PATH "
-                "and you have authenticated with 'claude' first."
-            )
         except Exception as e:
             logger.error(f"Error running Claude: {e}")
             raise ClaudeRunnerError(f"Failed to run Claude: {e}")
