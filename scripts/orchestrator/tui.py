@@ -139,12 +139,13 @@ class CloverDisplay:
             Panel for the agent.
         """
         # Build title
+        truncated_title = agent.title[:50] + ("…" if len(agent.title) > 50 else "")
         if agent.work_type == "issue":
             icon = "📝"
-            title = f"{icon} Issue #{agent.number}"
+            title = f"{icon} Issue #{agent.number}: {truncated_title}"
         else:
             icon = "🔍"
-            title = f"{icon} PR Review #{agent.number}"
+            title = f"{icon} PR Review #{agent.number}: {truncated_title}"
 
         # Status indicator
         if agent.status == "running":
