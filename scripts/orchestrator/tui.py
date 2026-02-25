@@ -164,6 +164,15 @@ class CloverDisplay:
         subtitle = Text()
         if agent.branch_name:
             subtitle.append(agent.branch_name, style="dim")
+        # Show pipeline step progress if available
+        if agent.current_step and agent.step_index:
+            if subtitle:
+                subtitle.append("  ")
+            step_num, total_steps = agent.step_index
+            subtitle.append(
+                f"Step {step_num}/{total_steps}: {agent.current_step}",
+                style="cyan",
+            )
         if agent.current_tool:
             if subtitle:
                 subtitle.append("  ")

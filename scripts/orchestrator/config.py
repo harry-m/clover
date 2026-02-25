@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 import yaml
 
+from .pipeline import GateConfig
+
 
 # Bundled prompts directory (shipped with Clover)
 BUNDLED_PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -90,6 +92,10 @@ class Config:
     retry_backoff: list[int] = field(
         default_factory=lambda: [300, 1800, 7200, 28800, 86400]
     )
+
+    # Pipeline settings
+    pipeline_gates: list[GateConfig] = field(default_factory=list)
+    pipeline_gate_max_retries: int = 2
 
     @property
     def repo_owner(self) -> str:
@@ -213,6 +219,31 @@ class Config:
         if not isinstance(retry_backoff, list):
             raise ValueError("daemon.retry.backoff must be a list of integers")
 
+        # Pipeline settings
+        pipeline_config = data.get("pipeline", {})
+        pipeline_gates_raw = pipeline_config.get("gates", [])
+        if not isinstance(pipeline_gates_raw, list):
+            raise ValueError("pipeline.gates must be a list")
+
+        pipeline_gates = []
+        for gate_data in pipeline_gates_raw:
+            if isinstance(gate_data, dict):
+                command = gate_data.get("command", "")
+                name = gate_data.get("name", command)
+                if command:
+                    pipeline_gates.append(GateConfig(command=command, name=name))
+            elif isinstance(gate_data, str):
+                pipeline_gates.append(GateConfig(command=gate_data, name=gate_data))
+
+        # Backward compat: if no pipeline.gates configured, use review.commands
+        if not pipeline_gates and review_commands:
+            pipeline_gates = [
+                GateConfig(command=cmd, name=cmd)
+                for cmd in review_commands
+            ]
+
+        pipeline_gate_max_retries = pipeline_config.get("gate_max_retries", 2)
+
         return cls(
             github_token=github_token,
             github_repo=github_repo,
@@ -231,6 +262,8 @@ class Config:
             claude_command=claude_command,
             max_review_fix_cycles=max_review_fix_cycles,
             retry_backoff=retry_backoff,
+            pipeline_gates=pipeline_gates,
+            pipeline_gate_max_retries=pipeline_gate_max_retries,
         )
 
 

@@ -189,6 +189,75 @@ class TestState:
             assert state.is_in_progress(WorkItemType.PR_REVIEW, 42)
 
 
+class TestPipelineState:
+    """Tests for pipeline tracking fields on WorkItem."""
+
+    def test_pipeline_fields_default(self):
+        """Test that pipeline fields default to None/0."""
+        item = WorkItem(
+            item_type=WorkItemType.ISSUE,
+            number=42,
+            status=WorkItemStatus.IN_PROGRESS,
+        )
+        assert item.pipeline_step is None
+        assert item.pipeline_step_cycle == 0
+
+    def test_pipeline_fields_to_dict(self):
+        """Test pipeline fields are serialized."""
+        item = WorkItem(
+            item_type=WorkItemType.ISSUE,
+            number=42,
+            status=WorkItemStatus.IN_PROGRESS,
+            pipeline_step="code_review",
+            pipeline_step_cycle=2,
+        )
+        d = item.to_dict()
+        assert d["pipeline_step"] == "code_review"
+        assert d["pipeline_step_cycle"] == 2
+
+    def test_pipeline_fields_from_dict(self):
+        """Test pipeline fields are deserialized."""
+        d = {
+            "item_type": "issue",
+            "number": 42,
+            "status": "in_progress",
+            "pipeline_step": "security_review",
+            "pipeline_step_cycle": 1,
+        }
+        item = WorkItem.from_dict(d)
+        assert item.pipeline_step == "security_review"
+        assert item.pipeline_step_cycle == 1
+
+    def test_pipeline_fields_from_dict_missing(self):
+        """Test backward compat: missing pipeline fields default properly."""
+        d = {
+            "item_type": "issue",
+            "number": 42,
+            "status": "in_progress",
+        }
+        item = WorkItem.from_dict(d)
+        assert item.pipeline_step is None
+        assert item.pipeline_step_cycle == 0
+
+    def test_pipeline_fields_persist(self):
+        """Test pipeline fields survive save/load cycle."""
+        with TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "state.json"
+
+            state1 = State(state_file)
+            item = state1.mark_in_progress(WorkItemType.ISSUE, 42)
+            item.pipeline_step = "code_review"
+            item.pipeline_step_cycle = 1
+            state1._dirty = True
+            state1._save()
+
+            state2 = State(state_file)
+            loaded = state2.get_item(WorkItemType.ISSUE, 42)
+            assert loaded is not None
+            assert loaded.pipeline_step == "code_review"
+            assert loaded.pipeline_step_cycle == 1
+
+
 class TestPausedState:
     """Tests for PAUSED status and retry logic."""
 

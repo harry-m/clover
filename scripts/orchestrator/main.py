@@ -13,10 +13,26 @@ from pathlib import Path
 from typing import Optional
 
 from .agent_context import AgentContext
-from .claude_runner import ClaudeRunner, ClaudeRunnerError, TransientClaudeError
+from .claude_runner import (
+    ClaudeRunner,
+    ClaudeRunnerError,
+    TransientClaudeError,
+    check_playwright_available,
+    get_playwright_mcp_config,
+)
 from .config import Config, load_config
 from .github_watcher import GitHubWatcher, Issue, PullRequest
 from .output_utils import format_output, format_commit_log_as_summary
+from .pipeline import (
+    GateConfig,
+    IssueContext,
+    PipelineConfig,
+    StepConfig,
+    StepResult,
+    StepType,
+    get_default_pipeline,
+    has_blocking_findings,
+)
 from .state import State, WorkItemStatus, WorkItemType
 from .tui import CloverDisplay, is_tty
 from .worktree_manager import WorktreeManager
@@ -667,19 +683,6 @@ class Orchestrator:
                     "*— Clover, the Claude Overseer*",
                 )
 
-            # Run Claude to implement
-            on_output = self.display.get_output_callback(agent) if agent else None
-            result = await self.claude.implement_issue(
-                issue_number=issue.number,
-                issue_title=issue.title,
-                issue_body=issue.body,
-                cwd=worktree.path,
-                on_output=on_output,
-            )
-
-            if not result.success:
-                raise ClaudeRunnerError(f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}")
-
             # Post resume comment if this was a retry
             if retry_count > 0:
                 try:
@@ -691,183 +694,29 @@ class Orchestrator:
                 except Exception:
                     pass
 
-            # Check if there are uncommitted changes (Claude made changes but didn't commit)
-            context = f"issue #{issue.number}: {issue.title}"
+            # Build issue context for the pipeline
+            dev_server_url = os.environ.get("CLOVER_DEV_URL")
+            context = IssueContext(
+                issue_number=issue.number,
+                issue_title=issue.title,
+                issue_body=issue.body,
+                base_branch=self._default_branch,
+                worktree_path=worktree.path,
+                branch_name=branch_name,
+                dev_server_url=dev_server_url,
+            )
+
+            # Run the pipeline
             try:
-                await self._ensure_committed(
-                    worktree.path, context, agent=agent, fatal=True,
-                )
+                result = await self._run_pipeline(context, agent)
             except ClaudeRunnerError:
                 worktree = None  # Prevent cleanup so user can inspect
                 raise
 
-            # Pre-PR review-fix cycles
-            if self.config.max_review_fix_cycles > 0:
-                for cycle in range(self.config.max_review_fix_cycles):
-                    commits_before = await self.worktrees.get_commit_count(
-                        worktree.path, self._default_branch
-                    )
-
-                    # Review (read-only, fresh session)
-                    logger.info(
-                        f"Issue #{issue.number}: Pre-PR review cycle {cycle + 1}/"
-                        f"{self.config.max_review_fix_cycles}"
-                    )
-                    on_output = self.display.get_output_callback(agent) if agent else None
-                    review_result = await self.claude.review_diff(
-                        issue_number=issue.number,
-                        issue_title=issue.title,
-                        issue_body=issue.body,
-                        base_branch=self._default_branch,
-                        cwd=worktree.path,
-                        on_output=on_output,
-                    )
-
-                    if not review_result.success:
-                        logger.warning(
-                            f"Issue #{issue.number}: Pre-PR review failed, "
-                            "continuing to tests"
-                        )
-                        break
-
-                    # Fix (write, fresh session)
-                    on_output = self.display.get_output_callback(agent) if agent else None
-                    fix_result = await self.claude.implement_diff_review(
-                        issue_number=issue.number,
-                        issue_title=issue.title,
-                        review_feedback=review_result.output,
-                        cwd=worktree.path,
-                        on_output=on_output,
-                    )
-
-                    if not fix_result.success:
-                        logger.warning(
-                            f"Issue #{issue.number}: Pre-PR review fix failed, "
-                            "continuing to tests"
-                        )
-                        break
-
-                    # Handle uncommitted changes after fix
-                    await self._ensure_committed(
-                        worktree.path,
-                        f"{context} (review fix)",
-                        agent=agent,
-                    )
-
-                    # Early exit: if fix made no new commits, no point continuing
-                    commits_after = await self.worktrees.get_commit_count(
-                        worktree.path, self._default_branch
-                    )
-                    if commits_after == commits_before:
-                        logger.info(
-                            f"Issue #{issue.number}: Review fix cycle {cycle + 1} "
-                            "made no changes, stopping review cycles"
-                        )
-                        break
-
-            # Run tests if configured
-            await self._run_tests_with_retry(worktree.path, context, agent=agent)
-
-            # Check if there are any commits to push
-            has_commits = await self.worktrees.has_commits_ahead(
-                worktree.path, self._default_branch
-            )
-
-            if not has_commits:
-                logger.info(f"No commits made for issue #{issue.number}, nothing to push")
-                no_changes_explanation = format_output(
-                    result.output,
-                    context="explanation",
-                    work_type="issue",
-                    number=issue.number,
-                )
-                await self.github.post_comment(
-                    issue.number,
-                    f"I looked at this issue but didn't find any changes to make.\n\n"
-                    f"**Claude's response:**\n\n{no_changes_explanation[:GITHUB_COMMENT_MAX_BODY]}\n\n"
-                    f"*— Clover, the Claude Overseer*",
-                )
-                # Remove clover label and add clover-complete
-                await self.github.remove_label(issue.number, self.config.clover_label)
-                await self.github.add_label(issue.number, "clover-complete")
-                self.state.mark_completed(WorkItemType.ISSUE, issue.number)
-                return
-
-            # Rebase on base branch if needed to avoid conflicts
-            is_behind = await self.worktrees.is_behind_base(
-                worktree.path, self._default_branch
-            )
-            if is_behind:
-                logger.info(f"Branch is behind {self._default_branch}, rebasing...")
-                success, error_msg = await self.worktrees.rebase_on_base(
-                    worktree.path, self._default_branch
-                )
-                if not success:
-                    logger.warning(
-                        f"Issue #{issue.number}: Could not update branch to match "
-                        f"{self._default_branch}: {error_msg}. "
-                        "Continuing with branch as-is."
-                    )
-
-            # Push branch (force needed after rebase)
-            await self.worktrees.push_branch(worktree.path, branch_name, force=True)
-
-            # Build summary: use Claude's output, fall back to commit log
-            async def get_commit_log_fallback() -> str:
-                commit_log = await self.worktrees.get_commit_log(
-                    worktree.path, self._default_branch
-                )
-                return format_commit_log_as_summary(commit_log)
-
-            # Note: format_output expects sync fallback, so we pre-fetch
-            commit_fallback = await get_commit_log_fallback()
-            summary = format_output(
-                result.output,
-                fallback_generator=lambda: commit_fallback,
-                context="summary",
-                work_type="issue",
-                number=issue.number,
-            )
-
-            # Create PR (GitHub body limit is 65536 chars)
-            pr_body = f"""Implements #{issue.number}
-
-## Changes
-
-{summary[:GITHUB_COMMENT_MAX_BODY]}
-
----
-*— Clover, the Claude Overseer*
-"""
-            pr = await self.github.create_pr(
-                branch=branch_name,
-                title=f"Implement #{issue.number}: {issue.title}",
-                body=pr_body,
-                base_branch=self._default_branch,
-            )
-
-            # Add clover label to PR so Clover will review it
-            await self.github.add_label(pr.number, self.config.clover_label)
-
-            # Remove clover label from issue and add clover-complete
-            await self.github.remove_label(issue.number, self.config.clover_label)
-            await self.github.add_label(issue.number, "clover-complete")
-
-            # Post completion comment on issue with PR link
-            pr_url = f"https://github.com/{self.config.github_repo}/pull/{pr.number}"
-            await self.github.post_comment(
-                issue.number,
-                f"✅ Finished working on this issue.\n\n"
-                f"**Summary:** {summary[:GITHUB_COMMENT_MAX_BODY]}\n\n"
-                f"**Pull Request:** {pr_url}\n\n"
-                f"*— Clover, the Claude Overseer*",
-            )
-
-            # Mark completed with link to the created PR
-            self.state.mark_completed(WorkItemType.ISSUE, issue.number, related_number=pr.number)
-            self._log(f"Created PR #{pr.number} for issue #{issue.number}")
-            if agent:
-                agent.mark_completed()
+            if result:
+                self._log(f"Created PR #{result} for issue #{issue.number}")
+                if agent:
+                    agent.mark_completed()
 
         except Exception as e:
             logger.error(f"Failed to process issue #{issue.number}: {e}")
@@ -904,6 +753,563 @@ class Orchestrator:
             # Refresh display
             if self.display:
                 self.display.refresh()
+
+    async def _run_pipeline(
+        self,
+        context: IssueContext,
+        agent: Optional[AgentContext] = None,
+    ) -> Optional[int]:
+        """Run the full processing pipeline for an issue.
+
+        Iterates through pipeline steps (implement, code review, security
+        review, browser testing), running gates between each step. Creates
+        a PR at the end if there are commits.
+
+        Args:
+            context: Issue context with all relevant metadata.
+            agent: Optional TUI agent for output tracking.
+
+        Returns:
+            PR number if a PR was created, None otherwise.
+        """
+        # Check Playwright availability once at pipeline start
+        browser_available = await check_playwright_available()
+        if not browser_available:
+            logger.info(
+                "Playwright MCP not found. Browser testing disabled. "
+                "Install with: npm install -g @playwright/mcp"
+            )
+
+        # Build pipeline config
+        pipeline = get_default_pipeline(
+            browser_available=browser_available,
+            dev_server_url=context.dev_server_url,
+            max_review_fix_cycles=self.config.max_review_fix_cycles,
+        )
+        # Apply configured gates
+        if self.config.pipeline_gates:
+            pipeline.gates = self.config.pipeline_gates
+        pipeline.gate_max_retries = self.config.pipeline_gate_max_retries
+
+        # Determine MCP config for browser-enabled steps
+        mcp_config = get_playwright_mcp_config() if browser_available else None
+
+        # Check pipeline state for resume
+        item = self.state.get_item(WorkItemType.ISSUE, context.issue_number)
+        resume_from_step = item.pipeline_step if item else None
+
+        total_steps = len(pipeline.steps)
+        skipping = resume_from_step is not None
+        impl_output = ""
+
+        for step_idx, step in enumerate(pipeline.steps):
+            # Handle resume: skip completed steps
+            if skipping:
+                if step.step_type.value == resume_from_step:
+                    skipping = False
+                    logger.info(
+                        f"Issue #{context.issue_number}: Resuming from step "
+                        f"{step.name}"
+                    )
+                else:
+                    logger.info(
+                        f"Issue #{context.issue_number}: Skipping completed "
+                        f"step {step.name}"
+                    )
+                    continue
+
+            # Update TUI
+            if agent:
+                agent.current_step = step.name
+                agent.step_index = (step_idx + 1, total_steps)
+
+            # Update state for resume tracking
+            if item:
+                item.pipeline_step = step.step_type.value
+                item.pipeline_step_cycle = 0
+                self.state._dirty = True
+                self.state._save()
+
+            logger.info(
+                f"Issue #{context.issue_number}: Pipeline step {step_idx + 1}/"
+                f"{total_steps}: {step.name}"
+            )
+
+            # Run the step
+            step_result = await self._run_step(
+                step, context, agent, mcp_config=mcp_config,
+            )
+
+            if step.step_type == StepType.IMPLEMENT:
+                impl_output = step_result.output
+
+            if not step_result.success:
+                logger.warning(
+                    f"Issue #{context.issue_number}: Step {step.name} failed, "
+                    "continuing to next step"
+                )
+
+            # Run gates after each step
+            if pipeline.gates:
+                await self._run_gates(
+                    step, pipeline, context, agent, mcp_config=mcp_config,
+                )
+
+        # Create PR
+        return await self._run_create_pr(context, impl_output, agent)
+
+    async def _run_step(
+        self,
+        step: StepConfig,
+        context: IssueContext,
+        agent: Optional[AgentContext] = None,
+        mcp_config: Optional[dict] = None,
+    ) -> StepResult:
+        """Run a single pipeline step.
+
+        For IMPLEMENT: calls implement_issue then ensures committed.
+        For review steps: runs the review-fix loop.
+
+        Args:
+            step: Step configuration.
+            context: Issue context.
+            agent: Optional TUI agent.
+            mcp_config: Optional MCP config for Playwright.
+
+        Returns:
+            StepResult with success status and output.
+        """
+        log_context = f"issue #{context.issue_number}: {context.issue_title}"
+
+        if step.step_type == StepType.IMPLEMENT:
+            # Implementation step uses the existing implement_issue method
+            on_output = self.display.get_output_callback(agent) if agent else None
+            result = await self.claude.implement_issue(
+                issue_number=context.issue_number,
+                issue_title=context.issue_title,
+                issue_body=context.issue_body,
+                cwd=context.worktree_path,
+                on_output=on_output,
+            )
+
+            if not result.success:
+                raise ClaudeRunnerError(
+                    f"Implementation failed: {result.output[:GITHUB_COMMENT_MAX_BODY]}"
+                )
+
+            # Ensure all changes are committed
+            await self._ensure_committed(
+                context.worktree_path, log_context, agent=agent, fatal=True,
+            )
+
+            return StepResult(
+                step_type=step.step_type,
+                success=True,
+                output=result.output,
+            )
+        else:
+            # Review steps use the fix loop
+            return await self._run_fix_loop(
+                step, context, agent, mcp_config=mcp_config,
+            )
+
+    async def _run_fix_loop(
+        self,
+        step: StepConfig,
+        context: IssueContext,
+        agent: Optional[AgentContext] = None,
+        mcp_config: Optional[dict] = None,
+    ) -> StepResult:
+        """Run the generalized review-fix loop for a pipeline step.
+
+        Each cycle: review (read-only) -> check for blocking findings ->
+        fix (write) -> ensure committed -> check if changes were made.
+
+        Args:
+            step: Step configuration.
+            context: Issue context.
+            agent: Optional TUI agent.
+            mcp_config: Optional MCP config for Playwright.
+
+        Returns:
+            StepResult with cycle count and final output.
+        """
+        log_context = f"issue #{context.issue_number}: {context.issue_title}"
+
+        # Determine MCP config for this step's tools
+        step_mcp = None
+        if mcp_config and any("mcp__" in t for t in step.review_tools):
+            step_mcp = mcp_config
+
+        # Build the browser context string if dev URL is available
+        browser_context = ""
+        if context.dev_server_url and step.step_type == StepType.BROWSER_TESTING:
+            browser_context = (
+                f"\n\nA dev server is running at {context.dev_server_url}. "
+                "You can use the Playwright browser tools to navigate and test."
+            )
+
+        for cycle in range(step.max_fix_cycles):
+            logger.info(
+                f"Issue #{context.issue_number}: {step.name} cycle "
+                f"{cycle + 1}/{step.max_fix_cycles}"
+            )
+
+            # Update state for resume
+            item = self.state.get_item(WorkItemType.ISSUE, context.issue_number)
+            if item:
+                item.pipeline_step_cycle = cycle
+                self.state._dirty = True
+                self.state._save()
+
+            commits_before = await self.worktrees.get_commit_count(
+                context.worktree_path, context.base_branch
+            )
+
+            # Review phase (read-only, fresh session)
+            review_prompt = (
+                f"Review the implementation for issue "
+                f"#{context.issue_number}: {context.issue_title}\n\n"
+                f"{context.issue_body}\n\n"
+                f"Run `git diff origin/{context.base_branch}...HEAD` to see "
+                f"all changes.{browser_context}"
+            )
+
+            system_prompt_file = (
+                self.config.get_prompt_file(step.review_prompt_file)
+                if step.review_prompt_file
+                else None
+            )
+
+            on_output = self.display.get_output_callback(agent) if agent else None
+            review_result = await self.claude.run(
+                prompt=review_prompt,
+                cwd=context.worktree_path,
+                system_prompt_file=system_prompt_file,
+                allowed_tools=step.review_tools,
+                on_output=on_output,
+                mcp_config=step_mcp,
+            )
+
+            if not review_result.success:
+                logger.warning(
+                    f"Issue #{context.issue_number}: {step.name} review "
+                    f"failed, stopping fix loop"
+                )
+                return StepResult(
+                    step_type=step.step_type,
+                    success=False,
+                    cycles_completed=cycle + 1,
+                    output=review_result.output,
+                )
+
+            # Check for blocking findings
+            if not has_blocking_findings(review_result.output):
+                logger.info(
+                    f"Issue #{context.issue_number}: {step.name} found no "
+                    f"blocking issues after cycle {cycle + 1}"
+                )
+                return StepResult(
+                    step_type=step.step_type,
+                    success=True,
+                    cycles_completed=cycle + 1,
+                    output=review_result.output,
+                )
+
+            # Fix phase (write-enabled, fresh session)
+            fix_prompt = (
+                f"Address the review feedback for issue "
+                f"#{context.issue_number}: {context.issue_title}\n\n"
+                f"## Review Feedback\n\n{review_result.output}\n\n"
+                f"---\n\nInstructions:\n"
+                f"1. Address all BLOCKING items — these must be fixed\n"
+                f"2. Address SUGGESTION items where you agree they improve the code\n"
+                f"3. Skip NITPICK items — do not act on them\n"
+                f"4. If you make changes, you MUST commit them with git\n"
+                f"5. If no changes are needed, state that explicitly"
+            )
+
+            fix_system_prompt = (
+                self.config.get_prompt_file(step.fix_prompt_file)
+                if step.fix_prompt_file
+                else None
+            )
+
+            # Determine MCP for fix tools
+            fix_mcp = None
+            if mcp_config and any("mcp__" in t for t in step.fix_tools):
+                fix_mcp = mcp_config
+
+            on_output = self.display.get_output_callback(agent) if agent else None
+            fix_result = await self.claude.run(
+                prompt=fix_prompt,
+                cwd=context.worktree_path,
+                system_prompt_file=fix_system_prompt,
+                allowed_tools=step.fix_tools,
+                on_output=on_output,
+                mcp_config=fix_mcp,
+            )
+
+            if not fix_result.success:
+                logger.warning(
+                    f"Issue #{context.issue_number}: {step.name} fix failed, "
+                    f"stopping fix loop"
+                )
+                return StepResult(
+                    step_type=step.step_type,
+                    success=False,
+                    cycles_completed=cycle + 1,
+                    output=fix_result.output,
+                )
+
+            # Ensure changes are committed
+            await self._ensure_committed(
+                context.worktree_path,
+                f"{log_context} ({step.name} fix)",
+                agent=agent,
+            )
+
+            # Check if fix made any new commits
+            commits_after = await self.worktrees.get_commit_count(
+                context.worktree_path, context.base_branch
+            )
+            if commits_after == commits_before:
+                logger.info(
+                    f"Issue #{context.issue_number}: {step.name} fix cycle "
+                    f"{cycle + 1} made no changes, stopping"
+                )
+                return StepResult(
+                    step_type=step.step_type,
+                    success=True,
+                    cycles_completed=cycle + 1,
+                    output=review_result.output,
+                )
+
+        # Exhausted max cycles
+        logger.info(
+            f"Issue #{context.issue_number}: {step.name} completed "
+            f"{step.max_fix_cycles} cycles"
+        )
+        return StepResult(
+            step_type=step.step_type,
+            success=True,
+            cycles_completed=step.max_fix_cycles,
+        )
+
+    async def _run_gates(
+        self,
+        step_just_completed: StepConfig,
+        pipeline: PipelineConfig,
+        context: IssueContext,
+        agent: Optional[AgentContext] = None,
+        mcp_config: Optional[dict] = None,
+    ) -> None:
+        """Run all configured gate commands after a pipeline step.
+
+        On failure, runs a contextual fix session that knows what step
+        just completed and retries the gate.
+
+        Args:
+            step_just_completed: The step that just finished.
+            pipeline: Pipeline configuration with gate definitions.
+            context: Issue context.
+            agent: Optional TUI agent.
+            mcp_config: Optional MCP config for Playwright.
+        """
+        log_context = f"issue #{context.issue_number}: {context.issue_title}"
+
+        for gate in pipeline.gates:
+            logger.info(
+                f"Issue #{context.issue_number}: Running gate: {gate.name}"
+            )
+
+            passed, output = await self.claude.run_checks(
+                commands=[gate.command],
+                cwd=context.worktree_path,
+            )
+
+            if passed:
+                logger.info(f"Gate passed: {gate.name}")
+                continue
+
+            # Gate failed — try to fix
+            for retry in range(pipeline.gate_max_retries):
+                logger.warning(
+                    f"Issue #{context.issue_number}: Gate '{gate.name}' "
+                    f"failed (attempt {retry + 1}/{pipeline.gate_max_retries})"
+                )
+
+                fix_prompt = (
+                    f"You just completed the {step_just_completed.name} step "
+                    f"for issue #{context.issue_number}: "
+                    f"{context.issue_title}.\n\n"
+                    f"The following check failed: {gate.name}\n"
+                    f"Command: `{gate.command}`\n\n"
+                    f"## Failure Output\n\n```\n{output}\n```\n\n"
+                    f"Fix the issue while keeping the broader implementation "
+                    f"goals in mind. Do not disable or skip the check."
+                )
+
+                gate_fix_prompt = self.config.get_prompt_file("gate_fix.md")
+
+                on_output = (
+                    self.display.get_output_callback(agent) if agent else None
+                )
+                await self.claude.run(
+                    prompt=fix_prompt,
+                    cwd=context.worktree_path,
+                    system_prompt_file=gate_fix_prompt,
+                    on_output=on_output,
+                )
+
+                await self._ensure_committed(
+                    context.worktree_path,
+                    f"{log_context} (gate fix: {gate.name})",
+                    agent=agent,
+                )
+
+                # Re-run the gate
+                passed, output = await self.claude.run_checks(
+                    commands=[gate.command],
+                    cwd=context.worktree_path,
+                )
+
+                if passed:
+                    logger.info(
+                        f"Gate '{gate.name}' passed after fix attempt "
+                        f"{retry + 1}"
+                    )
+                    break
+            else:
+                logger.error(
+                    f"Issue #{context.issue_number}: Gate '{gate.name}' "
+                    f"still failing after {pipeline.gate_max_retries} retries"
+                )
+
+    async def _run_create_pr(
+        self,
+        context: IssueContext,
+        impl_output: str,
+        agent: Optional[AgentContext] = None,
+    ) -> Optional[int]:
+        """Create a PR from the pipeline results.
+
+        Handles rebase, push, PR creation, label management, and
+        completion comments.
+
+        Args:
+            context: Issue context.
+            impl_output: Output from the implementation step (for summary).
+            agent: Optional TUI agent.
+
+        Returns:
+            PR number if created, None if no commits to push.
+        """
+        # Check if there are any commits to push
+        has_commits = await self.worktrees.has_commits_ahead(
+            context.worktree_path, context.base_branch
+        )
+
+        if not has_commits:
+            logger.info(
+                f"No commits made for issue #{context.issue_number}, "
+                "nothing to push"
+            )
+            no_changes_explanation = format_output(
+                impl_output,
+                context="explanation",
+                work_type="issue",
+                number=context.issue_number,
+            )
+            await self.github.post_comment(
+                context.issue_number,
+                f"I looked at this issue but didn't find any changes to make.\n\n"
+                f"**Claude's response:**\n\n"
+                f"{no_changes_explanation[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+                f"*— Clover, the Claude Overseer*",
+            )
+            await self.github.remove_label(
+                context.issue_number, self.config.clover_label
+            )
+            await self.github.add_label(context.issue_number, "clover-complete")
+            self.state.mark_completed(WorkItemType.ISSUE, context.issue_number)
+            return None
+
+        # Rebase on base branch if needed
+        is_behind = await self.worktrees.is_behind_base(
+            context.worktree_path, context.base_branch
+        )
+        if is_behind:
+            logger.info(
+                f"Branch is behind {context.base_branch}, rebasing..."
+            )
+            success, error_msg = await self.worktrees.rebase_on_base(
+                context.worktree_path, context.base_branch
+            )
+            if not success:
+                logger.warning(
+                    f"Issue #{context.issue_number}: Could not update branch "
+                    f"to match {context.base_branch}: {error_msg}. "
+                    "Continuing with branch as-is."
+                )
+
+        # Push branch (force needed after rebase)
+        await self.worktrees.push_branch(
+            context.worktree_path, context.branch_name, force=True
+        )
+
+        # Build summary
+        commit_log = await self.worktrees.get_commit_log(
+            context.worktree_path, context.base_branch
+        )
+        commit_fallback = format_commit_log_as_summary(commit_log)
+        summary = format_output(
+            impl_output,
+            fallback_generator=lambda: commit_fallback,
+            context="summary",
+            work_type="issue",
+            number=context.issue_number,
+        )
+
+        # Create PR
+        pr_body = (
+            f"Implements #{context.issue_number}\n\n"
+            f"## Changes\n\n"
+            f"{summary[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+            f"---\n*— Clover, the Claude Overseer*\n"
+        )
+        pr = await self.github.create_pr(
+            branch=context.branch_name,
+            title=f"Implement #{context.issue_number}: {context.issue_title}",
+            body=pr_body,
+            base_branch=context.base_branch,
+        )
+
+        # Label management
+        await self.github.add_label(pr.number, self.config.clover_label)
+        await self.github.remove_label(
+            context.issue_number, self.config.clover_label
+        )
+        await self.github.add_label(context.issue_number, "clover-complete")
+
+        # Post completion comment
+        pr_url = (
+            f"https://github.com/{self.config.github_repo}/pull/{pr.number}"
+        )
+        await self.github.post_comment(
+            context.issue_number,
+            f"✅ Finished working on this issue.\n\n"
+            f"**Summary:** {summary[:GITHUB_COMMENT_MAX_BODY]}\n\n"
+            f"**Pull Request:** {pr_url}\n\n"
+            f"*— Clover, the Claude Overseer*",
+        )
+
+        self.state.mark_completed(
+            WorkItemType.ISSUE,
+            context.issue_number,
+            related_number=pr.number,
+        )
+        return pr.number
 
     async def _process_pr_review(
         self,

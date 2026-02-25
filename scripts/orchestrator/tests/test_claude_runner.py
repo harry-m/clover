@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ..config import Config
-from ..claude_runner import ClaudeRunner, ClaudeResult, ClaudeRunnerError
+from ..claude_runner import ClaudeRunner, ClaudeResult, ClaudeRunnerError, get_playwright_mcp_config
 
 
 @pytest.fixture
@@ -373,3 +373,69 @@ class TestClaudeRunner:
 
             assert result.success is True
             assert "Summary" in result.output or "Looks good" in result.output
+
+    @pytest.mark.asyncio
+    async def test_run_with_mcp_config(self, runner):
+        """Test that --mcp-config flag is passed when mcp_config provided."""
+        result_json = json.dumps({
+            "type": "result",
+            "result": "Done with MCP",
+        })
+
+        mock_proc = create_mock_process(
+            stdout_lines=[result_json.encode() + b"\n"],
+            returncode=0
+        )
+
+        mcp_config = get_playwright_mcp_config()
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec:
+            result = await runner.run(
+                prompt="Test prompt",
+                cwd=Path("/tmp/test"),
+                mcp_config=mcp_config,
+            )
+
+            # Verify --mcp-config was included in the command
+            call_args = mock_exec.call_args[0]
+            assert "--mcp-config" in call_args
+            # Find the index and check the JSON value
+            mcp_idx = list(call_args).index("--mcp-config")
+            mcp_json = json.loads(call_args[mcp_idx + 1])
+            assert "mcpServers" in mcp_json
+            assert "playwright" in mcp_json["mcpServers"]
+
+    @pytest.mark.asyncio
+    async def test_run_without_mcp_config(self, runner):
+        """Test that --mcp-config is NOT passed when mcp_config is None."""
+        result_json = json.dumps({
+            "type": "result",
+            "result": "Done without MCP",
+        })
+
+        mock_proc = create_mock_process(
+            stdout_lines=[result_json.encode() + b"\n"],
+            returncode=0
+        )
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec:
+            result = await runner.run(
+                prompt="Test prompt",
+                cwd=Path("/tmp/test"),
+                mcp_config=None,
+            )
+
+            call_args = mock_exec.call_args[0]
+            assert "--mcp-config" not in call_args
+
+
+class TestPlaywrightMcpConfig:
+    """Tests for Playwright MCP config helper."""
+
+    def test_config_structure(self):
+        config = get_playwright_mcp_config()
+        assert "mcpServers" in config
+        assert "playwright" in config["mcpServers"]
+        server = config["mcpServers"]["playwright"]
+        assert server["command"] == "npx"
+        assert "--headless" in server["args"]

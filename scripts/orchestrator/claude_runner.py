@@ -78,6 +78,40 @@ class TransientClaudeError(ClaudeRunnerError):
     pass
 
 
+async def check_playwright_available() -> bool:
+    """Check if Playwright MCP server can be started.
+
+    Returns:
+        True if the npx @playwright/mcp package is available.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "@playwright/mcp@latest", "--help",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=30)
+        return proc.returncode == 0
+    except (FileNotFoundError, asyncio.TimeoutError):
+        return False
+
+
+def get_playwright_mcp_config() -> dict:
+    """Get the MCP configuration dict for Playwright headless browser.
+
+    Returns:
+        MCP config dict suitable for passing to ClaudeRunner.run(mcp_config=...).
+    """
+    return {
+        "mcpServers": {
+            "playwright": {
+                "command": "npx",
+                "args": ["@playwright/mcp@latest", "--headless"],
+            }
+        }
+    }
+
+
 class ClaudeRunner:
     """Runs Claude Code processes for implementation and review tasks."""
 
@@ -97,6 +131,7 @@ class ClaudeRunner:
         allowed_tools: Optional[list[str]] = None,
         timeout_seconds: int = 1800,  # 30 minutes default
         on_output: Optional[Callable[[str, Optional[str]], None]] = None,
+        mcp_config: Optional[dict] = None,
     ) -> ClaudeResult:
         """Run Claude Code with a prompt.
 
@@ -108,6 +143,8 @@ class ClaudeRunner:
             timeout_seconds: Maximum execution time.
             on_output: Optional callback for output lines. Called with (line, tool_name).
                        tool_name is set when a tool starts, None otherwise.
+            mcp_config: Optional MCP server configuration dict. When provided,
+                        passed as --mcp-config JSON to the Claude CLI.
 
         Returns:
             ClaudeResult with output and status.
@@ -141,6 +178,10 @@ class ClaudeRunner:
         # Add system prompt if provided
         if system_prompt_file and system_prompt_file.exists():
             cmd.extend(["--append-system-prompt", str(system_prompt_file)])
+
+        # Add MCP config if provided (e.g., for Playwright browser testing)
+        if mcp_config:
+            cmd.extend(["--mcp-config", json.dumps(mcp_config)])
 
         # Pass prompt via stdin to avoid shell escaping issues with multi-line prompts
         use_stdin = "\n" in prompt or "`" in prompt or len(prompt) > 1000

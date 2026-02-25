@@ -23,6 +23,9 @@ class AgentContext:
     status: str = "running"  # "running", "completed", "failed", "paused"
     current_tool: Optional[str] = None
     pause_reason: Optional[str] = None
+    # Pipeline progress tracking
+    current_step: Optional[str] = None
+    step_index: Optional[tuple[int, int]] = None  # (current_step, total_steps)
 
     def add_output(self, line: str) -> None:
         """Add a line of output to the buffer."""

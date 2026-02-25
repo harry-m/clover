@@ -60,6 +60,9 @@ class WorkItem:
     retry_count: int = 0
     next_retry_at: Optional[str] = None
     pause_comment_posted: bool = False
+    # Pipeline progress tracking (for resume after failure)
+    pipeline_step: Optional[str] = None
+    pipeline_step_cycle: int = 0
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -76,6 +79,8 @@ class WorkItem:
             "retry_count": self.retry_count,
             "next_retry_at": self.next_retry_at,
             "pause_comment_posted": self.pause_comment_posted,
+            "pipeline_step": self.pipeline_step,
+            "pipeline_step_cycle": self.pipeline_step_cycle,
         }
 
     @classmethod
@@ -94,6 +99,8 @@ class WorkItem:
             retry_count=data.get("retry_count", 0),
             next_retry_at=data.get("next_retry_at"),
             pause_comment_posted=data.get("pause_comment_posted", False),
+            pipeline_step=data.get("pipeline_step"),
+            pipeline_step_cycle=data.get("pipeline_step_cycle", 0),
         )
 
 
