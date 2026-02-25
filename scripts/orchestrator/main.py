@@ -822,6 +822,7 @@ class Orchestrator:
             if agent:
                 agent.current_step = step.name
                 agent.step_index = (step_idx + 1, total_steps)
+                agent.step_cycle = None  # Reset between steps
 
             # Update state for resume tracking
             if item:
@@ -954,6 +955,10 @@ class Orchestrator:
                 f"Issue #{context.issue_number}: {step.name} cycle "
                 f"{cycle + 1}/{step.max_fix_cycles}"
             )
+
+            # Update TUI with cycle progress
+            if agent:
+                agent.step_cycle = (cycle + 1, step.max_fix_cycles)
 
             # Update state for resume
             item = self.state.get_item(WorkItemType.ISSUE, context.issue_number)

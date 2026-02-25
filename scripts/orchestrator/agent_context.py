@@ -26,6 +26,7 @@ class AgentContext:
     # Pipeline progress tracking
     current_step: Optional[str] = None
     step_index: Optional[tuple[int, int]] = None  # (current_step, total_steps)
+    step_cycle: Optional[tuple[int, int]] = None  # (current_cycle, max_cycles)
 
     def add_output(self, line: str) -> None:
         """Add a line of output to the buffer."""

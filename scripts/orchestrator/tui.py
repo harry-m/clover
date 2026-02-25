@@ -150,7 +150,11 @@ class CloverDisplay:
         # Append pipeline step to title if available
         if agent.current_step and agent.step_index:
             step_num, total_steps = agent.step_index
-            title += f"  [cyan]({step_num}/{total_steps}: {agent.current_step})[/cyan]"
+            step_info = f"{step_num}/{total_steps}: {agent.current_step}"
+            if agent.step_cycle:
+                cycle_num, max_cycles = agent.step_cycle
+                step_info += f", fix cycle {cycle_num}/{max_cycles}"
+            title += f"  [cyan]({step_info})[/cyan]"
 
         # Status indicator
         if agent.status == "running":
